@@ -65,4 +65,5 @@ nav:
       - Rate Limiting: rate-limiting.md
   - Operacao:
       - Runbook Railway: runbook-railway.md
+      - Runbook Vercel: runbook-vercel.md
       - Troubleshooting: troubleshooting.md
