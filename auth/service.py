@@ -6,7 +6,7 @@ import os
 import jwt
 from datetime import datetime, timedelta
 from fastapi import HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthenticationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not JWT_SECRET:
@@ -26,7 +26,7 @@ def create_access_token(user_id: int, email: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
-async def get_current_user(credentials: HTTPAuthenticationCredentials = security):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = security):
     """
     Valida e decodifica o JWT token do header Authorization.
     
