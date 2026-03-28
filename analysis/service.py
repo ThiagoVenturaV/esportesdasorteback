@@ -13,6 +13,10 @@ try:
     from groq import Groq
 except ImportError:
     Groq = None
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
 
 # TTL configurável por variáveis de ambiente
@@ -20,6 +24,7 @@ ANALYSIS_TTL_LIVE_MIN = int(os.getenv("ANALYSIS_TTL_LIVE_MINUTES", "5"))
 ANALYSIS_TTL_UPCOMING_H = int(os.getenv("ANALYSIS_TTL_UPCOMING_HOURS", "24"))
 ANALYSIS_MODEL_MAX_TOKENS = int(os.getenv("ANALYSIS_MODEL_MAX_TOKENS", "260"))
 ANALYSIS_MODEL_TEMPERATURE = float(os.getenv("ANALYSIS_MODEL_TEMPERATURE", "0.15"))
+GEMINI_MODEL_ANALYSIS = os.getenv("GEMINI_MODEL_ANALYSIS", "gemini-2.0-flash-lite")
 
 try:
     from db.neon import get_db_connection, release_connection
@@ -153,21 +158,8 @@ def analyze_match_with_ai(match_data: dict, prompt: str = None) -> dict | None:
     Análise de partida com Groq (JSON estruturado).
     Temperature=0.2, max_tokens=900, response_format json_object.
     """
-    if not Groq:
-        return None
-    
-    try:
-        import os
-        groq_model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        
-        if not groq_api_key:
-            return None
-        
-        groq_client = Groq(api_key=groq_api_key)
-        
-        if not prompt:
-            prompt = f"""Retorne APENAS JSON válido para análise esportiva curta.
+    if not prompt:
+        prompt = f"""Retorne APENAS JSON válido para análise esportiva curta.
 
 Campos obrigatórios:
 - winProbability: {{"home": int, "draw": int, "away": int}} (somar ~100)
@@ -183,15 +175,49 @@ Campos obrigatórios:
 
 Dados da partida:
 {json.dumps(match_data, ensure_ascii=False)}"""
-        
+
+    # 1) Gemini primário
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if genai and gemini_api_key:
+        try:
+            genai.configure(api_key=gemini_api_key)
+            model = genai.GenerativeModel(GEMINI_MODEL_ANALYSIS)
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": ANALYSIS_MODEL_TEMPERATURE,
+                    "max_output_tokens": ANALYSIS_MODEL_MAX_TOKENS,
+                },
+            )
+            text = str(getattr(response, "text", "") or "").strip()
+            if text.startswith("```"):
+                text = text.replace("```json", "").replace("```", "").strip()
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            print(f"[ANALYSIS] Gemini indisponível, usando fallback Groq: {e}")
+
+    # 2) Groq fallback
+    if not Groq:
+        return None
+
+    try:
+        groq_model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+        groq_api_key = os.getenv("GROQ_API_KEY")
+
+        if not groq_api_key:
+            return None
+
+        groq_client = Groq(api_key=groq_api_key)
         completion = groq_client.chat.completions.create(
             model=groq_model,
             temperature=ANALYSIS_MODEL_TEMPERATURE,
             max_tokens=ANALYSIS_MODEL_MAX_TOKENS,
             response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
-        
+
         return json.loads(completion.choices[0].message.content)
     except Exception as e:
         print(f"[ANALYSIS] Groq erro: {e}")

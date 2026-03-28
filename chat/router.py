@@ -11,6 +11,10 @@ try:
     from groq import Groq
 except ImportError:
     Groq = None
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
 from chat.edson import EDSON_SYSTEM_PROMPT
 
@@ -39,6 +43,8 @@ CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.35"))
 CHAT_FAST_CACHE_TTL_SECONDS = int(os.getenv("CHAT_FAST_CACHE_TTL_SECONDS", "90"))
 CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "8"))
 CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "720"))
+GEMINI_MODEL_CHAT = os.getenv("GEMINI_MODEL_CHAT", "gemini-2.0-flash-lite")
+GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "openai/gpt-oss-120b")
 
 # Cache em memória para perguntas repetidas em curto intervalo.
 _fast_cache: dict[str, tuple[float, dict]] = {}
@@ -205,6 +211,75 @@ def _set_fast_cache(cache_key: str, payload: dict):
             _fast_cache.pop(key, None)
 
 
+def _messages_to_plain_prompt(messages: list[dict]) -> str:
+    lines = []
+    for item in messages:
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+
+        if role == "system":
+            lines.append(f"[SISTEMA]\n{content}")
+        elif role == "assistant":
+            lines.append(f"[ASSISTENTE]\n{content}")
+        else:
+            lines.append(f"[USUARIO]\n{content}")
+
+    lines.append(
+        "[INSTRUCAO FINAL]\nResponda em pt-BR de forma objetiva, sem JSON e sem listas longas."
+    )
+    return "\n\n".join(lines)
+
+
+def _call_gemini_chat(messages: list[dict]) -> str | None:
+    if not genai:
+        return None
+
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        return None
+
+    try:
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL_CHAT)
+        prompt = _messages_to_plain_prompt(messages)
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": CHAT_TEMPERATURE,
+                "max_output_tokens": CHAT_RESPONSE_MAX_TOKENS,
+            },
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        return text or None
+    except Exception as e:
+        print(f"[CHAT] Gemini indisponível, usando fallback Groq: {e}")
+        return None
+
+
+def _call_groq_chat(messages: list[dict]) -> str | None:
+    if not Groq:
+        return None
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        return None
+
+    try:
+        groq_client = Groq(api_key=groq_api_key)
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL_CHAT,
+            temperature=CHAT_TEMPERATURE,
+            max_tokens=CHAT_RESPONSE_MAX_TOKENS,
+            messages=messages,
+        )
+        return str(completion.choices[0].message.content or "").strip() or None
+    except Exception as e:
+        print(f"[CHAT] Groq indisponível: {e}")
+        return None
+
+
 # Aplicar rate limit ao endpoint
 def _apply_rate_limit():
     """Retorna o decorator de rate limit se disponível."""
@@ -261,18 +336,7 @@ async def chat(request: Request, payload: ChatRequest):
     
     [Implementação completa pendente - Fase 2]
     """
-    if not Groq:
-        raise HTTPException(status_code=503, detail="SDK Groq não está instalada no backend")
-    
     try:
-        from main import GROQ_MODEL_CHAT
-
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        if not groq_api_key:
-            raise HTTPException(status_code=503, detail="GROQ_API_KEY não configurada")
-
-        groq_client = Groq(api_key=groq_api_key)
-
         # Build messages list for conversation (normaliza formatos Gemini/OpenAI)
         messages = [{"role": "system", "content": EDSON_SYSTEM_PROMPT}]
         history = payload.conversation_history or payload.history
@@ -294,16 +358,16 @@ async def chat(request: Request, payload: ChatRequest):
             "role": "user",
             "content": user_message
         })
-        
-        # Call Groq API with chat model
-        completion = groq_client.chat.completions.create(
-            model=GROQ_MODEL_CHAT,
-            temperature=CHAT_TEMPERATURE,
-            max_tokens=CHAT_RESPONSE_MAX_TOKENS,
-            messages=messages
-        )
-        
-        response_text = _coerce_to_natural_ptbr(completion.choices[0].message.content)
+
+        # Provider chain: Gemini primário -> Groq fallback.
+        provider_text = _call_gemini_chat(messages)
+        if not provider_text:
+            provider_text = _call_groq_chat(messages)
+
+        if not provider_text:
+            raise HTTPException(status_code=503, detail="Nenhum provedor de IA disponível")
+
+        response_text = _coerce_to_natural_ptbr(provider_text)
 
         result = {
             "response": response_text,

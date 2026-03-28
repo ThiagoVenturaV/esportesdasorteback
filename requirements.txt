@@ -10,6 +10,7 @@ psycopg2-binary>=2.9.10
 
 # AI
 groq==1.1.1
+google-generativeai>=0.8.0
 
 # HTTP
 requests==2.32.5
