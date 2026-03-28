@@ -174,7 +174,7 @@ def _normalize_analysis_payload(raw: dict | None, home_team: str, away_team: str
         "commentary": [str(x) for x in commentary[:4]],
         "goalProbabilityNextMinute": _safe_int(raw.get("goalProbabilityNextMinute"), 42),
         "cardRiskHome": _safe_int(raw.get("cardRiskHome"), 38),
-        "cardRiskAway": _safe_int(raw.get("cardRiskAway"), 36),
+        "cardRiskAway": _safe_int(raw.get("cardRiskAway") or raw.get("cardRisskAway"), 36),
         "penaltyRisk": _safe_int(raw.get("penaltyRisk"), 18),
         "momentumHome": _safe_int(raw.get("momentumHome"), 51),
         "momentumAway": _safe_int(raw.get("momentumAway"), 49),
