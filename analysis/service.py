@@ -24,7 +24,7 @@ ANALYSIS_TTL_LIVE_MIN = int(os.getenv("ANALYSIS_TTL_LIVE_MINUTES", "5"))
 ANALYSIS_TTL_UPCOMING_H = int(os.getenv("ANALYSIS_TTL_UPCOMING_HOURS", "24"))
 ANALYSIS_MODEL_MAX_TOKENS = int(os.getenv("ANALYSIS_MODEL_MAX_TOKENS", "260"))
 ANALYSIS_MODEL_TEMPERATURE = float(os.getenv("ANALYSIS_MODEL_TEMPERATURE", "0.15"))
-GEMINI_MODEL_ANALYSIS = os.getenv("GEMINI_MODEL_ANALYSIS", "gemini-2.0-flash-lite")
+GEMINI_MODEL_ANALYSIS = os.getenv("GEMINI_MODEL_ANALYSIS", "gemini-2.5-flash-lite")
 
 try:
     from db.neon import get_db_connection, release_connection

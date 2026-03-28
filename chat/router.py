@@ -43,7 +43,7 @@ CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.35"))
 CHAT_FAST_CACHE_TTL_SECONDS = int(os.getenv("CHAT_FAST_CACHE_TTL_SECONDS", "90"))
 CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "8"))
 CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "720"))
-GEMINI_MODEL_CHAT = os.getenv("GEMINI_MODEL_CHAT", "gemini-2.0-flash-lite")
+GEMINI_MODEL_CHAT = os.getenv("GEMINI_MODEL_CHAT", "gemini-2.5-flash-lite")
 GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "openai/gpt-oss-120b")
 
 # Cache em memória para perguntas repetidas em curto intervalo.
