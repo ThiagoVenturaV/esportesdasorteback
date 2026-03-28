@@ -215,6 +215,22 @@ CORS_ORIGINS=https://esportesdasorte.vercel.app,http://localhost:5173
 
 ## Como Executar
 
+## Validação automática pós-push (Painel QA)
+
+Para disparar checklist automaticamente após cada `git push`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Execução manual (quando quiser):
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy/post_push_panel.ps1
+```
+
+O relatório é salvo em `deploy/reports/`.
+
 ### Setup Inicial
 
 ```bash
