@@ -8,6 +8,7 @@ Gerencia cache de análises com diferentes TTLs:
 
 import os
 import json
+import re
 from datetime import datetime, UTC
 try:
     from groq import Groq
@@ -153,13 +154,95 @@ def get_historical_context(*args, **kwargs):
     raise NotImplementedError("get_historical_context não implementado")
 
 
+def _safe_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _extract_json_candidate(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "").replace("```", "").strip()
+
+    if raw.startswith("{") and raw.endswith("}"):
+        return raw
+
+    match = re.search(r"\{[\s\S]*\}", raw)
+    return match.group(0).strip() if match else raw
+
+
+def _parse_json_loose(text: str) -> dict | None:
+    candidate = _extract_json_candidate(text)
+    if not candidate:
+        return None
+
+    try:
+        data = json.loads(candidate)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _coerce_analysis_payload(data: dict | None, match_data: dict) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+
+    home_team = str(match_data.get("home_team") or "Time Casa")
+    away_team = str(match_data.get("away_team") or "Time Fora")
+
+    win = data.get("winProbability") or data.get("win_probability") or {}
+    home = _safe_int(win.get("home") if isinstance(win, dict) else 34, 34)
+    draw = _safe_int(win.get("draw") if isinstance(win, dict) else 32, 32)
+    away = _safe_int(win.get("away") if isinstance(win, dict) else 34, 34)
+
+    total = max(1, home + draw + away)
+    home = round(home * 100 / total)
+    draw = round(draw * 100 / total)
+    away = max(0, 100 - home - draw)
+
+    commentary = data.get("commentary")
+    if isinstance(commentary, str):
+        commentary = [commentary]
+    if not isinstance(commentary, list) or not commentary:
+        commentary = [f"{home_team} x {away_team}: análise baseada em contexto de partida e histórico recente."]
+
+    predicted = str(data.get("predictedWinner") or data.get("prediction") or home_team)
+    predicted_norm = predicted.strip().lower()
+    if predicted_norm in {"home", "home_win", "casa", "mandante", "1"}:
+        predicted = home_team
+    elif predicted_norm in {"away", "away_win", "fora", "visitante", "2"}:
+        predicted = away_team
+    elif predicted_norm in {"draw", "empate", "x"}:
+        predicted = "Empate"
+
+    return {
+        "winProbability": {"home": home, "draw": draw, "away": away},
+        "confidenceScore": _safe_int(data.get("confidenceScore") or data.get("confidence"), 52),
+        "predictedWinner": predicted,
+        "commentary": [str(x) for x in commentary[:4]],
+        "goalProbabilityNextMinute": _safe_int(data.get("goalProbabilityNextMinute"), 42),
+        "cardRiskHome": _safe_int(data.get("cardRiskHome"), 38),
+        "cardRiskAway": _safe_int(data.get("cardRiskAway") or data.get("cardRisskAway"), 36),
+        "penaltyRisk": _safe_int(data.get("penaltyRisk"), 18),
+        "momentumHome": _safe_int(data.get("momentumHome"), 51),
+        "momentumAway": _safe_int(data.get("momentumAway"), 49),
+    }
+
+
 def analyze_match_with_ai(match_data: dict, prompt: str = None) -> dict | None:
     """
     Análise de partida com Groq (JSON estruturado).
     Temperature=0.2, max_tokens=900, response_format json_object.
     """
     if not prompt:
-        prompt = f"""Retorne APENAS JSON válido para análise esportiva curta.
+        prompt = f"""Retorne APENAS JSON válido para análise esportiva curta (sem markdown, sem texto extra).
 
 Campos obrigatórios:
 - winProbability: {{"home": int, "draw": int, "away": int}} (somar ~100)
@@ -190,11 +273,10 @@ Dados da partida:
                 },
             )
             text = str(getattr(response, "text", "") or "").strip()
-            if text.startswith("```"):
-                text = text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(text)
-            if isinstance(data, dict):
-                return data
+            data = _parse_json_loose(text)
+            normalized = _coerce_analysis_payload(data, match_data)
+            if normalized:
+                return normalized
         except Exception as e:
             print(f"[ANALYSIS] Gemini indisponível, usando fallback Groq: {e}")
 
@@ -210,15 +292,31 @@ Dados da partida:
             return None
 
         groq_client = Groq(api_key=groq_api_key)
+        try:
+            completion = groq_client.chat.completions.create(
+                model=groq_model,
+                temperature=ANALYSIS_MODEL_TEMPERATURE,
+                max_tokens=ANALYSIS_MODEL_MAX_TOKENS,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            parsed = _parse_json_loose(completion.choices[0].message.content)
+            normalized = _coerce_analysis_payload(parsed, match_data)
+            if normalized:
+                return normalized
+        except Exception as strict_error:
+            print(f"[ANALYSIS] Groq strict JSON falhou, retry livre: {strict_error}")
+
+        # Retry sem response_format para evitar json_validate_failed no provedor.
         completion = groq_client.chat.completions.create(
             model=groq_model,
             temperature=ANALYSIS_MODEL_TEMPERATURE,
             max_tokens=ANALYSIS_MODEL_MAX_TOKENS,
-            response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
         )
-
-        return json.loads(completion.choices[0].message.content)
+        parsed = _parse_json_loose(completion.choices[0].message.content)
+        normalized = _coerce_analysis_payload(parsed, match_data)
+        return normalized
     except Exception as e:
         print(f"[ANALYSIS] Groq erro: {e}")
         return None
