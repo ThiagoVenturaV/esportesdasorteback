@@ -28,6 +28,70 @@ class ChatRequest(BaseModel):
     history: list = Field(default_factory=list)
 
 
+def _normalize_role(role: str) -> str | None:
+    normalized = str(role or "").strip().lower()
+    if normalized in {"assistant", "model", "bot"}:
+        return "assistant"
+    if normalized in {"user", "human"}:
+        return "user"
+    if normalized == "system":
+        return "system"
+    return None
+
+
+def _extract_text_from_message(item: dict) -> str:
+    # OpenAI-like: {"content": "..."}
+    content = item.get("content")
+    if isinstance(content, str):
+        return content.strip()
+
+    # OpenAI multi-part: {"content": [{"type":"text","text":"..."}]}
+    if isinstance(content, list):
+        chunks = []
+        for part in content:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                txt = part.get("text") or part.get("content")
+                if isinstance(txt, str) and txt.strip():
+                    chunks.append(txt.strip())
+        return "\n".join(chunks).strip()
+
+    # Gemini-like: {"parts": [{"text":"..."}]}
+    parts = item.get("parts")
+    if isinstance(parts, list):
+        chunks = []
+        for part in parts:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                txt = part.get("text")
+                if isinstance(txt, str) and txt.strip():
+                    chunks.append(txt.strip())
+        return "\n".join(chunks).strip()
+
+    return ""
+
+
+def _normalize_history(history: list) -> list:
+    messages = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+
+        role = _normalize_role(item.get("role"))
+        if not role:
+            continue
+
+        text = _extract_text_from_message(item)
+        if not text:
+            continue
+
+        messages.append({"role": role, "content": text})
+
+    return messages
+
+
 # Aplicar rate limit ao endpoint
 def _apply_rate_limit():
     """Retorna o decorator de rate limit se disponível."""
@@ -96,11 +160,11 @@ async def chat(request: Request, payload: ChatRequest):
 
         groq_client = Groq(api_key=groq_api_key)
 
-        # Build messages list for conversation
+        # Build messages list for conversation (normaliza formatos Gemini/OpenAI)
         messages = []
         history = payload.conversation_history or payload.history
         if history:
-            messages.extend(history)
+            messages.extend(_normalize_history(history))
         messages.append({
             "role": "user",
             "content": payload.message
