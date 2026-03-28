@@ -34,9 +34,11 @@ class ChatRequest(BaseModel):
 
 CHAT_HISTORY_MAX_TURNS = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "8"))
 CHAT_MAX_USER_CHARS = int(os.getenv("CHAT_MAX_USER_CHARS", "500"))
-CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CHAT_RESPONSE_MAX_TOKENS", "320"))
+CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CHAT_RESPONSE_MAX_TOKENS", "220"))
 CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.35"))
 CHAT_FAST_CACHE_TTL_SECONDS = int(os.getenv("CHAT_FAST_CACHE_TTL_SECONDS", "90"))
+CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "8"))
+CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "720"))
 
 # Cache em memória para perguntas repetidas em curto intervalo.
 _fast_cache: dict[str, tuple[float, dict]] = {}
@@ -120,7 +122,13 @@ def _coerce_to_natural_ptbr(text: str) -> str:
         return "Não consegui montar uma análise agora."
 
     if not (raw.startswith("{") and raw.endswith("}")):
-        return raw
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if CHAT_MAX_RESPONSE_LINES > 0:
+            lines = lines[:CHAT_MAX_RESPONSE_LINES]
+        compact = "\n".join(lines) if lines else raw
+        if CHAT_MAX_RESPONSE_CHARS > 0 and len(compact) > CHAT_MAX_RESPONSE_CHARS:
+            compact = compact[: CHAT_MAX_RESPONSE_CHARS].rstrip() + "..."
+        return compact
 
     try:
         data = json.loads(raw)
@@ -146,7 +154,10 @@ def _coerce_to_natural_ptbr(text: str) -> str:
             lines.append("Fatores-chave: " + "; ".join(str(x) for x in factors[:3]))
 
         if lines:
-            return " ".join(lines)
+            compact = " ".join(lines)
+            if CHAT_MAX_RESPONSE_CHARS > 0 and len(compact) > CHAT_MAX_RESPONSE_CHARS:
+                compact = compact[: CHAT_MAX_RESPONSE_CHARS].rstrip() + "..."
+            return compact
         return "Análise concluída, mas sem detalhes legíveis no momento."
     except Exception:
         return raw
