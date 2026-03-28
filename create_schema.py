@@ -1,6 +1,6 @@
 """
-Script para criar as tabelas principais no Neon PostgreSQL
-Execute isso uma única vez para setup inicial
+Script para criar as tabelas principais no Neon PostgreSQL.
+Execute isso uma única vez para setup inicial.
 """
 
 from db_neon import get_db_connection, release_connection
@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_partida ON tb_chat_historico(id_partida);
 -- Tabela de cache/histórico de análises geradas pela IA
 CREATE TABLE IF NOT EXISTS tb_analise (
     id_analise SERIAL PRIMARY KEY,
-    match_id VARCHAR(50),
+    match_id VARCHAR(50) UNIQUE,
     analise_json JSONB,
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -63,7 +63,48 @@ ALTER TABLE tb_analise ADD COLUMN IF NOT EXISTS match_id VARCHAR(50);
 ALTER TABLE tb_analise ADD COLUMN IF NOT EXISTS analise_json JSONB;
 ALTER TABLE tb_analise ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 
-CREATE INDEX IF NOT EXISTS idx_analise_match_id ON tb_analise(match_id);
+-- Adicionar constraint UNIQUE em match_id se não existir
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analise_match_unique ON tb_analise(match_id);
+CREATE INDEX IF NOT EXISTS idx_analise_criado_em ON tb_analise(criado_em DESC);
+
+-- Tabela de contexto persistente do Edson (Fase 4)
+CREATE TABLE IF NOT EXISTS tb_edson_context (
+    id SERIAL PRIMARY KEY,
+    usuario_id INTEGER REFERENCES tb_usuario(id_usuario) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    match_id TEXT,
+    tokens_used INTEGER DEFAULT 0,
+    criado_em TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_edson_ctx_user ON tb_edson_context (usuario_id, criado_em DESC);
+CREATE INDEX IF NOT EXISTS idx_edson_ctx_session ON tb_edson_context (session_id);
+CREATE INDEX IF NOT EXISTS idx_edson_ctx_criado_em ON tb_edson_context (criado_em);
+
+-- Migração para instalações antigas sem FK em usuario_id
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'tb_edson_context'
+          AND column_name = 'usuario_id'
+    ) THEN
+        BEGIN
+            ALTER TABLE tb_edson_context
+            ADD CONSTRAINT fk_edson_context_usuario
+            FOREIGN KEY (usuario_id)
+            REFERENCES tb_usuario(id_usuario)
+            ON DELETE CASCADE;
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+            WHEN undefined_table THEN NULL;
+            WHEN undefined_column THEN NULL;
+        END;
+    END IF;
+END $$;
 
 -- Contexto persistente do Edson
 CREATE TABLE IF NOT EXISTS tb_edson_context (
@@ -83,17 +124,18 @@ def create_schema():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Executa o SQL do schema
+
         cursor.execute(CREATE_SCHEMA_SQL)
         conn.commit()
-        
+
         print("✓ Schema criado com sucesso!")
         print("✓ Tabelas criadas:")
         print("  - tb_partida_historico (para dados StatsBomb)")
         print("  - tb_usuario (para autenticação)")
         print("  - tb_chat_historico (para RAG/contexto)")
-        
+        print("  - tb_analise (cache de análises IA)")
+        print("  - tb_edson_context (memória persistente do Edson)")
+
     except Exception as e:
         print(f"✗ Erro ao criar schema: {e}")
         if conn:

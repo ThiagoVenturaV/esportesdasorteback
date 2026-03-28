@@ -1,7 +1,7 @@
 import os
 import json
 import pandas as pd
-from db_neon import get_db_connection
+from db_neon import get_db_connection, release_connection
 
 PARQUET_DIR = os.getenv(
     "PARQUET_DIR",
@@ -85,8 +85,7 @@ def load_matches_to_neon(limit_files=5):
         print(f"✗ Erro na conexão: {e}")
         return 0
     finally:
-        if conn:
-            conn.close()
+        release_connection(conn)
 
 if __name__ == "__main__":
     load_matches_to_neon(limit_files=2)

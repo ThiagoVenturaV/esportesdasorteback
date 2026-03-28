@@ -1,92 +1,22 @@
 """
-Auth service — password hashing, JWT tokens, validation.
+auth/service.py — Lógica de autenticação e JWT
 """
+
 import os
-import re
-import secrets
-import hashlib
-import hmac
-from datetime import datetime, timedelta
-from typing import Optional
-
 import jwt
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer
+from datetime import datetime, timedelta
+from fastapi import HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthenticationCredentials
 
-from models import Usuario
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise ValueError("JWT_SECRET não configurada. Gerar com: openssl rand -hex 32")
 
-PASSWORD_PBKDF2_ITERATIONS = 310000
-JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 security = HTTPBearer()
 
 
-# ── Helpers ──────────────────────────────────────────────
-
-def _only_digits(value) -> str:
-    return re.sub(r"\D", "", str(value or ""))
-
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        PASSWORD_PBKDF2_ITERATIONS,
-    )
-    return f"pbkdf2_sha256${PASSWORD_PBKDF2_ITERATIONS}${salt}${digest.hex()}"
-
-
-def verify_password(input_password: str, stored_password: str) -> bool:
-    stored = str(stored_password or "")
-    if not stored:
-        return False
-
-    # Legacy: plain-text passwords
-    if "$" not in stored:
-        return hmac.compare_digest(stored, str(input_password or ""))
-
-    try:
-        algo, iters, salt, stored_digest = stored.split("$", 3)
-        if algo != "pbkdf2_sha256":
-            return False
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            str(input_password or "").encode("utf-8"),
-            salt.encode("utf-8"),
-            int(iters),
-        )
-        return hmac.compare_digest(digest.hex(), stored_digest)
-    except Exception:
-        return False
-
-
-def validate_signup_payload(novo_usuario: Usuario) -> Optional[str]:
-    if len(str(novo_usuario.nome_usuario or "").strip()) < 3:
-        return "Nome deve ter pelo menos 3 caracteres."
-
-    email = str(novo_usuario.email_usuario or "").strip().lower()
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        return "E-mail inválido."
-
-    cpf_digits = _only_digits(novo_usuario.cpf_usuario)
-    if len(cpf_digits) != 11:
-        return "CPF deve conter 11 dígitos."
-
-    phone_digits = _only_digits(novo_usuario.telefone_usuario)
-    if len(phone_digits) not in (10, 11):
-        return "Telefone deve conter 10 ou 11 dígitos."
-
-    password = str(novo_usuario.senha_usuario or "")
-    if len(password) < 8:
-        return "Senha deve ter no mínimo 8 caracteres."
-
-    return None
-
-
-# ── JWT ──────────────────────────────────────────────────
-
 def create_access_token(user_id: int, email: str) -> str:
+    """Cria um JWT token com expiração de 24h."""
     payload = {
         "sub": str(user_id),
         "email": email,
@@ -96,11 +26,29 @@ def create_access_token(user_id: int, email: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
-async def get_current_user(token=Depends(security)):
+async def get_current_user(credentials: HTTPAuthenticationCredentials = security):
+    """
+    Valida e decodifica o JWT token do header Authorization.
+    
+    Uso: async def my_route(user=Depends(get_current_user)):
+    
+    Retorna o payload do JWT contendo 'sub' (user_id) e 'email'.
+    """
+    token = credentials.credentials
     try:
-        payload = jwt.decode(token.credentials, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(
+            token, JWT_SECRET, algorithms=["HS256"]
+        )
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expirado")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expirado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except jwt.InvalidTokenError:
-        raise HTTPException(401, "Token inválido")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )

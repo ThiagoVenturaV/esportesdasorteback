@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from psycopg2.extras import execute_values
 
-from db_neon import get_db_connection
+from db_neon import get_db_connection, release_connection
 
 
 CREATE_TABLE_SQL = """
@@ -169,7 +169,7 @@ def import_fbref_csv(csv_path: Path, season: str, batch_size: int = 500) -> int:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 def parse_args() -> argparse.Namespace:

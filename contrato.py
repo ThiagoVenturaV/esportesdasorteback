@@ -2,21 +2,18 @@
 # contrato.py — DICIONÁRIO DE CAMPOS COMPARTILHADOS
 # ============================================================
 # Este arquivo é a "fonte da verdade" do projeto.
-# M3, M4 e M5 importam daqui — ninguém inventa nome de campo.
+# Define os contratos de dados entre módulos.
 #
-# REGRA: se precisar mudar um campo, mude AQUI e avise no Discord.
-# Nenhum membro altera este arquivo sem alinhar com os outros.
+# REGRA: se precisar mudar um campo, mude AQUI.
 # ============================================================
 
 
 # ----------------------------------------------------------
-# CONTRATO 1 — O que M3 (betsapi.py) entrega para M4
+# CONTRATO 1 — Dados de jogo ao vivo (BetsAPI / Sportingtech)
 # ----------------------------------------------------------
-# M3 se compromete a sempre devolver um dicionário com estes campos.
-# Se a BetsAPI não retornar algum dado, M3 usa o valor padrão abaixo.
 
 CONTRATO_JOGO_AO_VIVO = {
-    "event_id":       None,   # str   — ID único do jogo na BetsAPI
+    "event_id":       None,   # str   — ID único do jogo
     "time_a":         None,   # str   — Nome do time da casa
     "time_b":         None,   # str   — Nome do time visitante
     "gols_a":         0,      # int   — Gols do time A
@@ -32,62 +29,52 @@ CONTRATO_JOGO_AO_VIVO = {
 
 
 # ----------------------------------------------------------
-# CONTRATO 2 — O que M5 (analyst.py) recebe e devolve
+# CONTRATO 2 — Análise gerada pela IA (Groq / Edson)
 # ----------------------------------------------------------
-# M5 RECEBE: os campos de CONTRATO_JOGO_AO_VIVO + dados de jogadores
-# M5 DEVOLVE: um dicionário com estes campos exatos.
 
 CONTRATO_ANALISE = {
-    "chance_gol_a":        0.0,   # float — % de chance de gol do time A (0–100)
-    "chance_gol_b":        0.0,   # float — % de chance de gol do time B (0–100)
-    "vencedor_provavel":   None,  # str   — Nome do time favorito ou "Equilíbrio"
-    "confianca_vencedor":  None,  # str   — "Alta" | "Média" | "Baixa"
-    "risco_cartao":        None,  # dict  — {"nome": str, "risco": float}
-    "narrativa_ia":        None,  # str   — Texto gerado pelo Groq/Llama
-    "movimento_destaque":  None,  # str   — Variação notável de odds, ou None
-    "alerta":              None,  # str   — Insight especial, ou None
-    "probabilidades": {
-        "time_a": None,           # str   — ex: "58% — favorito moderado"
-        "empate": None,           # str   — ex: "22% — improvável mas real"
-        "time_b": None,           # str   — ex: "20% — azarão com chance"
-    }
+    "matchId":                   None,   # str   — ID da partida
+    "winProbability":            None,   # dict  — {"home": int, "draw": int, "away": int}
+    "goalProbabilityNextMinute": 0,      # int   — % de chance de gol no próximo minuto
+    "cardRiskHome":              0,      # int   — % de risco de cartão (casa)
+    "cardRiskAway":              0,      # int   — % de risco de cartão (fora)
+    "penaltyRisk":               0,      # int   — % de risco de pênalti
+    "momentumHome":              None,   # list  — 15 inteiros 0-100
+    "momentumAway":              None,   # list  — 15 inteiros 0-100
+    "commentary":                None,   # list  — 2 strings de comentário
+    "predictedWinner":           None,   # str   — Nome do time favorito ou "Empate"
+    "confidenceScore":           0,      # int   — 0-100 confiança da análise
 }
 
 
 # ----------------------------------------------------------
-# CONTRATO 3 — Campos da tabela tb_usuario no MySQL
+# CONTRATO 3 — Campos da tabela tb_usuario (Neon PostgreSQL)
 # ----------------------------------------------------------
-# M4 usa esses campos para validar os dados antes de salvar.
-# A ordem aqui é a mesma ordem do INSERT no banco.
 
 CAMPOS_USUARIO = [
     "nome_usuario",       # str  — Nome completo
     "email_usuario",      # str  — E-mail único (chave de login)
-    "cpf_usuario",        # str  — CPF (ex: "123.456.789-00")
+    "cpf_usuario",        # str  — CPF (11 dígitos, sem formatação)
     "dataNac_usuario",    # date — Data de nascimento (YYYY-MM-DD)
     "endereco_usuario",   # str  — Endereço completo (opcional)
-    "telefone_usuario",   # str  — Telefone com DDD
-    "senha_usuario",      # str  — Senha (hash em produção real)
+    "telefone_usuario",   # str  — Telefone com DDD (10/11 dígitos)
+    "senha_usuario",      # str  — Hash PBKDF2-SHA256
 ]
 
 
 # ----------------------------------------------------------
-# SQL DE CRIAÇÃO DA TABELA — rode no Railway para criar o banco
+# SQL DE CRIAÇÃO — usar via create_schema.py
 # ----------------------------------------------------------
-# Como usar:
-#   1. Acesse Railway → seu serviço MySQL → aba "Query"
-#   2. Cole o SQL abaixo e execute (botão Run)
-#   3. A tabela tb_usuario será criada. Faça isso só uma vez.
 
 SQL_CRIAR_TABELA_USUARIO = """
 CREATE TABLE IF NOT EXISTS tb_usuario (
-    id_usuario       INT AUTO_INCREMENT PRIMARY KEY,
-    nome_usuario     VARCHAR(150)  NOT NULL,
-    email_usuario    VARCHAR(150)  NOT NULL UNIQUE,
-    cpf_usuario      VARCHAR(14)   NOT NULL UNIQUE,
-    dataNac_usuario  DATE          NOT NULL,
-    endereco_usuario VARCHAR(255),
-    telefone_usuario VARCHAR(20)   NOT NULL,
+    id_usuario       SERIAL PRIMARY KEY,
+    nome_usuario     VARCHAR(255)  NOT NULL,
+    email_usuario    VARCHAR(255)  NOT NULL UNIQUE,
+    cpf_usuario      VARCHAR(11)   UNIQUE,
+    dataNac_usuario  DATE,
+    endereco_usuario TEXT,
+    telefone_usuario VARCHAR(20),
     senha_usuario    VARCHAR(255)  NOT NULL,
     criado_em        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
 );
@@ -95,11 +82,8 @@ CREATE TABLE IF NOT EXISTS tb_usuario (
 
 
 # ----------------------------------------------------------
-# DADOS MOCK — use quando quiser testar sem a BetsAPI
+# DADOS MOCK — para desenvolvimento local sem APIs
 # ----------------------------------------------------------
-# Substitui uma chamada real de API durante o desenvolvimento.
-# M4 pode retornar JOGO_MOCK direto na rota /api/jogos
-# se quiser testar o front-end sem depender de M3.
 
 JOGO_MOCK = {
     "event_id":       "mock_001",

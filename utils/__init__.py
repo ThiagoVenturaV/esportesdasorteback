@@ -1,0 +1,3 @@
+"""
+utils/ — Utilitários do backend
+"""
