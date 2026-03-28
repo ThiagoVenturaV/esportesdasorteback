@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import os
 import json
 import time
+import re
 try:
     from groq import Groq
 except ImportError:
@@ -17,6 +18,18 @@ except ImportError:
     genai = None
 
 from chat.edson import EDSON_SYSTEM_PROMPT
+
+try:
+    from db.neon import get_db_connection, release_connection
+except Exception:
+    get_db_connection = None
+    release_connection = None
+
+try:
+    from odds.betsapi import fetch_live_matches, fetch_upcoming_matches
+except Exception:
+    fetch_live_matches = None
+    fetch_upcoming_matches = None
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -45,6 +58,20 @@ CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "8"))
 CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "720"))
 GEMINI_MODEL_CHAT = os.getenv("GEMINI_MODEL_CHAT", "gemini-2.5-flash-lite")
 GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "openai/gpt-oss-120b")
+CHAT_USE_DB_CONTEXT = os.getenv("CHAT_USE_DB_CONTEXT", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHAT_USE_BETSAPI_CONTEXT = os.getenv("CHAT_USE_BETSAPI_CONTEXT", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHAT_DB_CONTEXT_LIMIT = int(os.getenv("CHAT_DB_CONTEXT_LIMIT", "6"))
+CHAT_BETSAPI_CONTEXT_LIMIT = int(os.getenv("CHAT_BETSAPI_CONTEXT_LIMIT", "6"))
 
 # Cache em memória para perguntas repetidas em curto intervalo.
 _fast_cache: dict[str, tuple[float, dict]] = {}
@@ -211,6 +238,192 @@ def _set_fast_cache(cache_key: str, payload: dict):
             _fast_cache.pop(key, None)
 
 
+def _extract_terms(text: str, max_terms: int = 6) -> list[str]:
+    terms = [t.lower() for t in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", str(text or ""))]
+    deduped = []
+    seen = set()
+    for term in terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+        if len(deduped) >= max_terms:
+            break
+    return deduped
+
+
+def _should_fetch_betsapi_context(user_message: str) -> bool:
+    msg = str(user_message or "").lower()
+    keywords = (
+        "ao vivo",
+        "live",
+        "jogo",
+        "partida",
+        "time",
+        "times",
+        "aposta",
+        "odds",
+        "mercado",
+        "palpite",
+        "campeonato",
+    )
+    return any(k in msg for k in keywords)
+
+
+def _get_db_context_rows(user_message: str, limit: int = 6) -> list[dict]:
+    if not CHAT_USE_DB_CONTEXT or not get_db_connection or not release_connection:
+        return []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        terms = _extract_terms(user_message)
+
+        if terms:
+            like_terms = [f"%{t}%" for t in terms]
+            cursor.execute(
+                """
+                SELECT id_partida, competicao, temporada, time_casa, time_fora, gols_casa, gols_fora
+                FROM tb_partida_historico
+                WHERE LOWER(time_casa) LIKE ANY(%s)
+                   OR LOWER(time_fora) LIKE ANY(%s)
+                   OR LOWER(competicao) LIKE ANY(%s)
+                ORDER BY id_partida DESC
+                LIMIT %s
+                """,
+                (like_terms, like_terms, like_terms, max(1, limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id_partida, competicao, temporada, time_casa, time_fora, gols_casa, gols_fora
+                FROM tb_partida_historico
+                ORDER BY id_partida DESC
+                LIMIT %s
+                """,
+                (max(1, limit),),
+            )
+
+        rows = cursor.fetchall() or []
+        parsed = []
+        for row in rows:
+            parsed.append(
+                {
+                    "id_partida": row[0],
+                    "competicao": row[1],
+                    "temporada": row[2],
+                    "time_casa": row[3],
+                    "time_fora": row[4],
+                    "gols_casa": row[5],
+                    "gols_fora": row[6],
+                }
+            )
+        return parsed
+    except Exception as e:
+        print(f"[CHAT] Falha ao buscar contexto no DB: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                release_connection(conn)
+            except Exception:
+                pass
+
+
+def _get_betsapi_context_rows(user_message: str, limit: int = 6) -> list[dict]:
+    if not CHAT_USE_BETSAPI_CONTEXT:
+        return []
+    if not _should_fetch_betsapi_context(user_message):
+        return []
+
+    rows: list[dict] = []
+    try:
+        if fetch_live_matches:
+            live = fetch_live_matches() or []
+            for item in live[: max(1, limit)]:
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    {
+                        "kind": "live",
+                        "id": item.get("id") or item.get("match_id") or item.get("event_id"),
+                        "league": item.get("league") or item.get("league_name") or item.get("competition"),
+                        "home": item.get("home") or item.get("home_team") or item.get("home_team_name"),
+                        "away": item.get("away") or item.get("away_team") or item.get("away_team_name"),
+                        "score": item.get("ss") or f"{item.get('home_score', 0)}-{item.get('away_score', 0)}",
+                        "minute": (item.get("timer") or {}).get("tm") if isinstance(item.get("timer"), dict) else item.get("minute"),
+                    }
+                )
+
+        if not rows and fetch_upcoming_matches:
+            upcoming = fetch_upcoming_matches(days=3) or []
+            for item in upcoming[: max(1, limit)]:
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    {
+                        "kind": "upcoming",
+                        "id": item.get("id") or item.get("match_id") or item.get("event_id"),
+                        "league": item.get("league") or item.get("league_name") or item.get("competition"),
+                        "home": item.get("home") or item.get("home_team") or item.get("home_team_name"),
+                        "away": item.get("away") or item.get("away_team") or item.get("away_team_name"),
+                        "score": None,
+                        "minute": None,
+                    }
+                )
+    except Exception as e:
+        print(f"[CHAT] Falha ao buscar contexto BetsAPI: {e}")
+
+    return rows[: max(1, limit)]
+
+
+def _build_runtime_context_text(user_message: str) -> str:
+    db_rows = _get_db_context_rows(user_message, CHAT_DB_CONTEXT_LIMIT)
+    bets_rows = _get_betsapi_context_rows(user_message, CHAT_BETSAPI_CONTEXT_LIMIT)
+
+    parts = [
+        "[CONTEXTO EXECUCAO]",
+        "Use apenas os dados abaixo como apoio factual quando houver correspondencia com a pergunta.",
+    ]
+
+    if db_rows:
+        parts.append("[BANCO_HISTORICO_NEON]")
+        for row in db_rows:
+            parts.append(
+                (
+                    f"- {row.get('competicao') or 'Competicao'} "
+                    f"({row.get('temporada') or 'N/A'}): "
+                    f"{row.get('time_casa') or 'Time Casa'} {row.get('gols_casa') if row.get('gols_casa') is not None else '-'}"
+                    f" x {row.get('gols_fora') if row.get('gols_fora') is not None else '-'} {row.get('time_fora') or 'Time Fora'}"
+                )
+            )
+
+    if bets_rows:
+        parts.append("[BETSAPI_PARTIDAS]")
+        for row in bets_rows:
+            kind = "AO_VIVO" if row.get("kind") == "live" else "PROXIMO"
+            minute = row.get("minute")
+            minute_text = f" minuto {minute}" if minute not in (None, "", 0, "0") else ""
+            score = row.get("score")
+            score_text = f" placar {score}" if score else ""
+            parts.append(
+                (
+                    f"- [{kind}] {row.get('league') or 'Liga'}: "
+                    f"{row.get('home') or 'Time Casa'} x {row.get('away') or 'Time Fora'}"
+                    f"{score_text}{minute_text}"
+                )
+            )
+
+    if not db_rows and not bets_rows:
+        return ""
+
+    parts.append(
+        "[REGRAS_DE_USO] Se nao houver dado suficiente no contexto para responder com seguranca, diga isso objetivamente e ofereca proximo passo util."
+    )
+    return "\n".join(parts)
+
+
 def _messages_to_plain_prompt(messages: list[dict]) -> str:
     lines = []
     for item in messages:
@@ -349,6 +562,10 @@ async def chat(request: Request, payload: ChatRequest):
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensagem vazia")
 
+        runtime_context_text = _build_runtime_context_text(user_message)
+        if runtime_context_text:
+            messages.append({"role": "system", "content": runtime_context_text})
+
         cache_key = _build_fast_cache_key(user_message, normalized_history)
         cached_payload = _get_fast_cache(cache_key)
         if cached_payload:
@@ -378,7 +595,7 @@ async def chat(request: Request, payload: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[CHAT] Erro ao chamar Groq: {e}")
+        print(f"[CHAT] Erro ao processar chat: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao processar chat")
 
 

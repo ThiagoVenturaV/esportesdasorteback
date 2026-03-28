@@ -55,6 +55,7 @@ nav:
   - Inicio: index.md
   - Guia:
       - Primeiros Passos: guia-primeiros-passos.md
+      - Guia Linha a Linha: guia-linha-a-linha.md
       - Configuracao: configuracao.md
       - Deploy: deploy.md
   - Backend:

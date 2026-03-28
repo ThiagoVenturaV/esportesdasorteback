@@ -5,10 +5,19 @@ auth/router.py — Rotas de autenticação
 from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
+import psycopg2
 import os
 
 # Importar funções de JWT
-from auth.service import create_access_token, get_current_user
+from auth.service import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+    validate_signup_payload,
+    _only_digits,
+)
+from models import Usuario
 
 # Importar conexão com banco
 try:
@@ -22,12 +31,16 @@ security = HTTPBearer()
 
 class LoginRequest(BaseModel):
     """Modelo de requisição de login."""
-    email: str
-    senha: str
+    email: str | None = None
+    senha: str | None = None
+    email_usuario: str | None = None
+    senha_usuario: str | None = None
 
 
 class LoginResponse(BaseModel):
     """Modelo de resposta do login."""
+    sucesso: bool = True
+    mensagem: str | None = None
     usuario: dict
     access_token: str
     token_type: str = "bearer"
@@ -54,40 +67,72 @@ async def login(payload: LoginRequest):
     """
     conn = None
     try:
+        email_raw = payload.email_usuario or payload.email or ""
+        senha_raw = payload.senha_usuario or payload.senha or ""
+
+        email_normalized = str(email_raw).strip().lower()
+        senha_input = str(senha_raw)
+
+        if not email_normalized or not senha_input:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Informe e-mail e senha.",
+            )
+
         conn = get_db_connection()
         cursor = conn.cursor()
         
         # Buscar usuário por email
         cursor.execute(
-            "SELECT id_usuario, nome_usuario, email_usuario FROM tb_usuario WHERE email_usuario = %s",
-            (payload.email,)
+            """
+            SELECT id_usuario, nome_usuario, email_usuario, cpf_usuario, telefone_usuario, senha_usuario
+            FROM tb_usuario
+            WHERE email_usuario = %s
+            """,
+            (email_normalized,)
         )
         user = cursor.fetchone()
         
-        if not user:
+        if not user or not verify_password(senha_input, user[5]):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Email ou senha inválidos"
             )
-        
-        # TODO: Fase 2 — Validar senha com hash (bcrypt/PBKDF2)
-        # Por agora, apenas validar existência do usuário
+
+        # Migração automática para hash se senha legada estiver em texto plano.
+        if "$" not in str(user[5] or ""):
+            try:
+                new_hash = hash_password(senha_input)
+                cursor.execute(
+                    "UPDATE tb_usuario SET senha_usuario = %s WHERE id_usuario = %s",
+                    (new_hash, user[0]),
+                )
+                conn.commit()
+            except Exception as migration_error:
+                print(f"[AUTH] Falha ao migrar hash de senha legada: {migration_error}")
         
         # Montar resposta
         usuario_dict = {
             "id": user[0],
+            "id_usuario": user[0],
             "nome": user[1],
+            "nome_usuario": user[1],
             "email": user[2],
+            "email_usuario": user[2],
+            "cpf_usuario": user[3],
+            "telefone_usuario": user[4],
         }
         
         # Gerar token JWT
         token = create_access_token(user[0], user[2])
-        
-        return LoginResponse(
-            usuario=usuario_dict,
-            access_token=token,
-            token_type="bearer"
-        )
+
+        return {
+            "sucesso": True,
+            "mensagem": f"Bem-vindo(a), {user[1]}!",
+            "usuario": usuario_dict,
+            "access_token": token,
+            "token_type": "bearer",
+        }
         
     except HTTPException:
         raise
@@ -97,6 +142,62 @@ async def login(payload: LoginRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro interno do servidor"
         )
+    finally:
+        if conn:
+            release_connection(conn)
+
+
+@router.post("/usuarios")
+async def criar_usuario(novo_usuario: Usuario):
+    """Cadastro de usuário com persistência no Neon e senha em hash PBKDF2."""
+    conn = None
+    try:
+        validation_error = validate_signup_payload(novo_usuario)
+        if validation_error:
+            return {"sucesso": False, "erro": validation_error}
+
+        email_normalized = str(novo_usuario.email_usuario or "").strip().lower()
+        cpf_normalized = _only_digits(novo_usuario.cpf_usuario)
+        phone_normalized = _only_digits(novo_usuario.telefone_usuario)
+        senha_hash = hash_password(novo_usuario.senha_usuario)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO tb_usuario
+                (nome_usuario, email_usuario, cpf_usuario, dataNac_usuario, endereco_usuario, telefone_usuario, senha_usuario)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id_usuario
+            """,
+            (
+                novo_usuario.nome_usuario,
+                email_normalized,
+                cpf_normalized,
+                novo_usuario.dataNac_usuario,
+                novo_usuario.endereco_usuario,
+                phone_normalized,
+                senha_hash,
+            ),
+        )
+        created = cursor.fetchone()
+        conn.commit()
+
+        return {
+            "sucesso": True,
+            "mensagem": "Usuário cadastrado com sucesso!",
+            "id_gerado": created[0] if created else None,
+        }
+    except psycopg2.IntegrityError:
+        if conn:
+            conn.rollback()
+        return {"sucesso": False, "erro": "E-mail ou CPF já cadastrado."}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[AUTH] Erro no cadastro: {e}")
+        return {"sucesso": False, "erro": "Erro interno ao cadastrar usuário."}
     finally:
         if conn:
             release_connection(conn)

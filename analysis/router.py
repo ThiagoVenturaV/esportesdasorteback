@@ -260,7 +260,37 @@ async def get_live_analyses(limit: int = 8):
             continue
 
         saved = get_saved_analysis(base["match_id"], is_live=True)
-        analysis = _normalize_analysis_payload(saved, base["home_team"], base["away_team"])
+        raw_analysis = saved
+
+        # Se não houver cache válido, tenta gerar análise real com IA.
+        if not raw_analysis:
+            generated = analyze_match_with_ai(
+                {
+                    "match_id": base["match_id"],
+                    "home_team": base["home_team"],
+                    "away_team": base["away_team"],
+                    "league": base["league_name"],
+                    "live_data": base["live_data"],
+                }
+            )
+            if isinstance(generated, dict):
+                normalized_generated = _normalize_analysis_payload(
+                    generated,
+                    base["home_team"],
+                    base["away_team"],
+                )
+                save_analysis(base["match_id"], normalized_generated)
+                raw_analysis = normalized_generated
+
+        # Evita retornar insights mockados quando não existe análise real.
+        if not raw_analysis:
+            continue
+
+        analysis = _normalize_analysis_payload(
+            raw_analysis,
+            base["home_team"],
+            base["away_team"],
+        )
 
         analyses.append(
             {
