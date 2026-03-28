@@ -523,6 +523,81 @@ def _messages_to_plain_prompt(messages: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _tokenize_for_similarity(text: str) -> set[str]:
+    return {
+        t.lower()
+        for t in re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", str(text or ""))
+    }
+
+
+def _jaccard_similarity(a: str, b: str) -> float:
+    left = _tokenize_for_similarity(a)
+    right = _tokenize_for_similarity(b)
+    if not left or not right:
+        return 0.0
+    inter = len(left.intersection(right))
+    union = len(left.union(right))
+    return inter / union if union else 0.0
+
+
+def _get_last_assistant_message(history_messages: list[dict]) -> str:
+    for item in reversed(history_messages or []):
+        if str(item.get("role") or "").lower() == "assistant":
+            return str(item.get("content") or "").strip()
+    return ""
+
+
+def _is_repetitive_reply(reply: str, history_messages: list[dict], user_message: str) -> bool:
+    last_assistant = _get_last_assistant_message(history_messages)
+    if not last_assistant:
+        return False
+
+    similarity = _jaccard_similarity(reply, last_assistant)
+    short_follow_up = len(str(user_message or "").split()) <= 4
+    return similarity >= 0.72 or (short_follow_up and similarity >= 0.55)
+
+
+def _build_actionable_followup_fallback(user_message: str) -> str:
+    msg = str(user_message or "").strip()
+    return (
+        f"Fechado, vamos objetivo em cima disso: {msg or 'partida atual'}. "
+        "Entrada principal: vitoria do favorito com protecao parcial em empate (DNB), confianca media. "
+        "Alternativa conservadora: under da equipe que esta em desvantagem, buscando menos volatilidade. "
+        "Gestao sugerida: stake fracionada (50% principal, 30% conservadora, 20% reserva para ajuste ao vivo). "
+        "Risco principal: gol aleatorio no fim por bola parada mudando totalmente o mercado."
+    )
+
+
+def _rewrite_if_repetitive(messages: list[dict], user_message: str, repeated_reply: str) -> str | None:
+    rewrite_messages = list(messages)
+    rewrite_messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Reescreva sem repetir frases da resposta anterior. "
+                "Entregue uma resposta realmente util para aposta, em 4 a 6 linhas, com: "
+                "leitura do cenario, entrada principal, alternativa conservadora, risco principal e gestao de stake. "
+                "Nao use lista numerada."
+            ),
+        }
+    )
+    rewrite_messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"Pergunta atual: {user_message}\n"
+                f"Resposta repetitiva anterior (evitar): {repeated_reply}\n"
+                "Agora entregue uma nova resposta objetiva e diferente."
+            ),
+        }
+    )
+
+    rewritten = _call_gemini_chat(rewrite_messages)
+    if not rewritten:
+        rewritten = _call_groq_chat(rewrite_messages)
+    return rewritten
+
+
 def _contains_forbidden_fallback_phrases(text: str) -> bool:
     body = str(text or "").lower()
     blocked = (
@@ -696,6 +771,13 @@ async def chat(request: Request, payload: ChatRequest):
         response_text = _coerce_to_natural_ptbr(provider_text)
         if _contains_forbidden_fallback_phrases(response_text):
             response_text = _build_confident_mock_reply(user_message)
+
+        if _is_repetitive_reply(response_text, normalized_history, user_message):
+            rewritten = _rewrite_if_repetitive(messages, user_message, response_text)
+            if rewritten:
+                response_text = _coerce_to_natural_ptbr(rewritten)
+            if _is_repetitive_reply(response_text, normalized_history, user_message):
+                response_text = _build_actionable_followup_fallback(user_message)
 
         result = {
             "response": response_text,
