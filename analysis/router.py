@@ -2,6 +2,8 @@
 analysis/router.py — Rotas de análise de partidas
 """
 
+import ast
+
 from fastapi import APIRouter, Depends
 from analysis.service import get_saved_analysis, analyze_match_with_ai, save_analysis
 from odds.betsapi import fetch_live_matches
@@ -19,8 +21,36 @@ def _safe_int(value, default=0):
         return default
 
 
+def _display_name(value, fallback: str) -> str:
+    """Converte dicts/strings serializadas em nomes legíveis para o frontend."""
+    if value is None:
+        return fallback
+
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("short_name") or value.get("title") or fallback)
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return fallback
+
+        if (stripped.startswith("{") and stripped.endswith("}")) or (
+            stripped.startswith("[") and stripped.endswith("]")
+        ):
+            try:
+                parsed = ast.literal_eval(stripped)
+                if isinstance(parsed, dict):
+                    return str(parsed.get("name") or parsed.get("short_name") or parsed.get("title") or fallback)
+            except Exception:
+                return stripped
+
+        return stripped
+
+    return str(value)
+
+
 def _extract_live_fields(match: dict) -> dict:
-    home_team = (
+    home_team_raw = (
         match.get("home")
         or match.get("home_team")
         or match.get("home_team_name")
@@ -28,7 +58,7 @@ def _extract_live_fields(match: dict) -> dict:
         or match.get("team_home")
         or "Time Casa"
     )
-    away_team = (
+    away_team_raw = (
         match.get("away")
         or match.get("away_team")
         or match.get("away_team_name")
@@ -36,6 +66,8 @@ def _extract_live_fields(match: dict) -> dict:
         or match.get("team_away")
         or "Time Fora"
     )
+    home_team = _display_name(home_team_raw, "Time Casa")
+    away_team = _display_name(away_team_raw, "Time Fora")
 
     # BetsAPI frequentemente usa "ss" = "1-0"
     ss = str(match.get("ss") or "")
@@ -52,13 +84,14 @@ def _extract_live_fields(match: dict) -> dict:
     if minute is None:
         minute = timer.get("tm")
 
-    league_name = (
+    league_name_raw = (
         match.get("league")
         or match.get("league_name")
         or match.get("competition")
         or match.get("tournament")
         or "Ao Vivo"
     )
+    league_name = _display_name(league_name_raw, "Ao Vivo")
 
     match_id = (
         match.get("id")
@@ -72,7 +105,7 @@ def _extract_live_fields(match: dict) -> dict:
         "match_id": str(match_id),
         "home_team": str(home_team),
         "away_team": str(away_team),
-        "league_name": str(league_name),
+        "league_name": league_name,
         "live_data": {
             "home_score": _safe_int(home_score, 0),
             "away_score": _safe_int(away_score, 0),
@@ -113,16 +146,17 @@ def _normalize_analysis_payload(raw: dict | None, home_team: str, away_team: str
     if not isinstance(commentary, list) or not commentary:
         commentary = [f"Análise de {home_team} x {away_team} baseada no contexto disponível."]
 
-    predicted = (
+    predicted_raw = (
         raw.get("predictedWinner")
         or raw.get("prediction")
         or home_team
     )
+    predicted = _display_name(predicted_raw, home_team)
 
     return {
         "winProbability": {"home": home, "draw": draw, "away": away},
         "confidenceScore": _safe_int(raw.get("confidenceScore") or raw.get("confidence"), 52),
-        "predictedWinner": str(predicted),
+        "predictedWinner": predicted,
         "commentary": [str(x) for x in commentary[:4]],
         "goalProbabilityNextMinute": _safe_int(raw.get("goalProbabilityNextMinute"), 42),
         "cardRiskHome": _safe_int(raw.get("cardRiskHome"), 38),
