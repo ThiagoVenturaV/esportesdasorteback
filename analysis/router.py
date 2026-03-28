@@ -3,7 +3,7 @@ analysis/router.py — Rotas de análise de partidas
 """
 
 from fastapi import APIRouter, Depends
-from analysis.service import get_saved_analysis
+from analysis.service import get_saved_analysis, analyze_match_with_ai, save_analysis
 from odds.betsapi import fetch_live_matches
 
 
@@ -89,6 +89,47 @@ def _default_analysis(home_team: str, away_team: str) -> dict:
         "commentary": [
             f"{home_team} x {away_team}: dados ao vivo coletados."
         ],
+        "goalProbabilityNextMinute": 42,
+        "cardRiskHome": 38,
+        "cardRiskAway": 36,
+        "penaltyRisk": 18,
+        "momentumHome": 51,
+        "momentumAway": 49,
+    }
+
+
+def _normalize_analysis_payload(raw: dict | None, home_team: str, away_team: str) -> dict:
+    if not isinstance(raw, dict):
+        return _default_analysis(home_team, away_team)
+
+    win = raw.get("winProbability") or raw.get("win_probability") or {}
+    home = _safe_int(win.get("home") if isinstance(win, dict) else 0, 34)
+    draw = _safe_int(win.get("draw") if isinstance(win, dict) else 0, 32)
+    away = _safe_int(win.get("away") if isinstance(win, dict) else 0, 34)
+
+    commentary = raw.get("commentary")
+    if isinstance(commentary, str):
+        commentary = [commentary]
+    if not isinstance(commentary, list) or not commentary:
+        commentary = [f"Análise de {home_team} x {away_team} baseada no contexto disponível."]
+
+    predicted = (
+        raw.get("predictedWinner")
+        or raw.get("prediction")
+        or home_team
+    )
+
+    return {
+        "winProbability": {"home": home, "draw": draw, "away": away},
+        "confidenceScore": _safe_int(raw.get("confidenceScore") or raw.get("confidence"), 52),
+        "predictedWinner": str(predicted),
+        "commentary": [str(x) for x in commentary[:4]],
+        "goalProbabilityNextMinute": _safe_int(raw.get("goalProbabilityNextMinute"), 42),
+        "cardRiskHome": _safe_int(raw.get("cardRiskHome"), 38),
+        "cardRiskAway": _safe_int(raw.get("cardRiskAway"), 36),
+        "penaltyRisk": _safe_int(raw.get("penaltyRisk"), 18),
+        "momentumHome": _safe_int(raw.get("momentumHome"), 51),
+        "momentumAway": _safe_int(raw.get("momentumAway"), 49),
     }
 
 
@@ -108,7 +149,42 @@ async def get_analysis(match_id: str, is_live: bool = True):
             "match_id": match_id
         }
     
-    return analysis
+    return _normalize_analysis_payload(analysis, "Time Casa", "Time Fora")
+
+
+@router.get("/analises-salvas/{match_id}")
+async def get_saved_analysis_front(match_id: str, home_team: str = "Time Casa", away_team: str = "Time Fora"):
+    """Endpoint compatível com o frontend para leitura de análise já persistida."""
+    saved = get_saved_analysis(match_id, is_live=True)
+    if not saved:
+        return {"sucesso": False, "analise": None}
+
+    return {
+        "sucesso": True,
+        "analise": _normalize_analysis_payload(saved, home_team, away_team),
+    }
+
+
+@router.get("/analisar/{match_id}")
+async def analyze_match_front(match_id: str, home_team: str = "Time Casa", away_team: str = "Time Fora"):
+    """Endpoint compatível com o frontend para gerar análise sob demanda."""
+    saved = get_saved_analysis(match_id, is_live=True)
+    if saved:
+        return _normalize_analysis_payload(saved, home_team, away_team)
+
+    # Gera uma análise mínima se ainda não houver cache estruturado.
+    generated = analyze_match_with_ai(
+        {
+            "match_id": match_id,
+            "home_team": home_team,
+            "away_team": away_team,
+            "league": "Futebol",
+        }
+    )
+
+    normalized = _normalize_analysis_payload(generated, home_team, away_team)
+    save_analysis(match_id, normalized)
+    return normalized
 
 
 @router.get("/analises-ao-vivo")
@@ -126,10 +202,7 @@ async def get_live_analyses(limit: int = 8):
             continue
 
         saved = get_saved_analysis(base["match_id"], is_live=True)
-        analysis = saved if isinstance(saved, dict) else _default_analysis(
-            base["home_team"],
-            base["away_team"],
-        )
+        analysis = _normalize_analysis_payload(saved, base["home_team"], base["away_team"])
 
         analyses.append(
             {
