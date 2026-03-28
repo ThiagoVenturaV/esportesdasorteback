@@ -203,6 +203,29 @@ def _coerce_to_natural_ptbr(text: str) -> str:
         return raw
 
 
+def _strip_markdown_formatting(text: str) -> str:
+    cleaned = str(text or "")
+    if not cleaned:
+        return cleaned
+
+    # Remove fenced code blocks while preserving inner content.
+    cleaned = re.sub(r"```[a-zA-Z0-9_-]*\n?", "", cleaned)
+    cleaned = cleaned.replace("```", "")
+
+    # Remove inline markdown marks.
+    cleaned = cleaned.replace("**", "")
+    cleaned = cleaned.replace("__", "")
+    cleaned = cleaned.replace("`", "")
+
+    # Remove list markers at line start (ordered/unordered).
+    cleaned = re.sub(r"(?m)^\s*[-*+]\s+", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*\d+[\.)]\s+", "", cleaned)
+
+    # Collapse excessive blank lines.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _sanitize_user_message(text: str) -> str:
     msg = str(text or "").strip()
     if len(msg) > CHAT_MAX_USER_CHARS:
@@ -778,6 +801,8 @@ async def chat(request: Request, payload: ChatRequest):
                 response_text = _coerce_to_natural_ptbr(rewritten)
             if _is_repetitive_reply(response_text, normalized_history, user_message):
                 response_text = _build_actionable_followup_fallback(user_message)
+
+        response_text = _strip_markdown_formatting(response_text)
 
         result = {
             "response": response_text,
