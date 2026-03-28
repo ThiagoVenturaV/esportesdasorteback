@@ -2,8 +2,8 @@
 chat/router.py — Rotas de chat conversacional
 """
 
-from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 import os
 try:
     from groq import Groq
@@ -24,7 +24,8 @@ def set_limiter(limiter):
 class ChatRequest(BaseModel):
     """Modelo de requisição de chat."""
     message: str
-    conversation_history: list = []
+    conversation_history: list = Field(default_factory=list)
+    history: list = Field(default_factory=list)
 
 
 # Aplicar rate limit ao endpoint
@@ -84,20 +85,22 @@ async def chat(request: Request, payload: ChatRequest):
     [Implementação completa pendente - Fase 2]
     """
     if not Groq:
-        return {
-            "response": "Groq não está configurado",
-            "cta": None
-        }
+        raise HTTPException(status_code=503, detail="SDK Groq não está instalada no backend")
     
     try:
         from main import GROQ_MODEL_CHAT
-        
-        groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        
+
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise HTTPException(status_code=503, detail="GROQ_API_KEY não configurada")
+
+        groq_client = Groq(api_key=groq_api_key)
+
         # Build messages list for conversation
         messages = []
-        if payload.conversation_history:
-            messages.extend(payload.conversation_history)
+        history = payload.conversation_history or payload.history
+        if history:
+            messages.extend(history)
         messages.append({
             "role": "user",
             "content": payload.message
@@ -117,11 +120,10 @@ async def chat(request: Request, payload: ChatRequest):
             "response": response_text,
             "cta": None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[CHAT] Erro ao chamar Groq: {e}")
-        return {
-            "response": f"Erro ao processar requisição: {str(e)}",
-            "cta": None
-        }
+        raise HTTPException(status_code=500, detail=f"Erro ao processar chat: {str(e)}")
 
 
