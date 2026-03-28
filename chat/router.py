@@ -5,10 +5,13 @@ chat/router.py — Rotas de chat conversacional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 import os
+import json
 try:
     from groq import Groq
 except ImportError:
     Groq = None
+
+from chat.edson import EDSON_SYSTEM_PROMPT
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -26,6 +29,9 @@ class ChatRequest(BaseModel):
     message: str
     conversation_history: list = Field(default_factory=list)
     history: list = Field(default_factory=list)
+
+
+CHAT_HISTORY_MAX_TURNS = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "12"))
 
 
 def _normalize_role(role: str) -> str | None:
@@ -90,6 +96,52 @@ def _normalize_history(history: list) -> list:
         messages.append({"role": role, "content": text})
 
     return messages
+
+
+def _trim_history(messages: list) -> list:
+    # Mantém as últimas N mensagens para reduzir custo e latência.
+    if CHAT_HISTORY_MAX_TURNS <= 0:
+        return messages
+    return messages[-CHAT_HISTORY_MAX_TURNS:]
+
+
+def _coerce_to_natural_ptbr(text: str) -> str:
+    """Converte saída em JSON bruto para texto natural em pt-BR."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Não consegui montar uma análise agora."
+
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return raw
+
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return raw
+
+        commentary = data.get("commentary")
+        if isinstance(commentary, list) and commentary:
+            first = str(commentary[0]).strip()
+            if first:
+                return first
+
+        prediction = data.get("prediction") or data.get("predictedWinner")
+        confidence = data.get("confidence") or data.get("confidenceScore")
+        factors = data.get("key_factors") or data.get("keyFactors") or []
+
+        lines = []
+        if prediction:
+            lines.append(f"Palpite principal: {prediction}.")
+        if confidence is not None:
+            lines.append(f"Confiança estimada: {confidence}.")
+        if isinstance(factors, list) and factors:
+            lines.append("Fatores-chave: " + "; ".join(str(x) for x in factors[:3]))
+
+        if lines:
+            return " ".join(lines)
+        return "Análise concluída, mas sem detalhes legíveis no momento."
+    except Exception:
+        return raw
 
 
 # Aplicar rate limit ao endpoint
@@ -161,13 +213,13 @@ async def chat(request: Request, payload: ChatRequest):
         groq_client = Groq(api_key=groq_api_key)
 
         # Build messages list for conversation (normaliza formatos Gemini/OpenAI)
-        messages = []
+        messages = [{"role": "system", "content": EDSON_SYSTEM_PROMPT}]
         history = payload.conversation_history or payload.history
         if history:
-            messages.extend(_normalize_history(history))
+            messages.extend(_trim_history(_normalize_history(history)))
         messages.append({
             "role": "user",
-            "content": payload.message
+            "content": payload.message.strip()
         })
         
         # Call Groq API with chat model
@@ -178,7 +230,7 @@ async def chat(request: Request, payload: ChatRequest):
             messages=messages
         )
         
-        response_text = completion.choices[0].message.content
+        response_text = _coerce_to_natural_ptbr(completion.choices[0].message.content)
         
         return {
             "response": response_text,
@@ -188,6 +240,6 @@ async def chat(request: Request, payload: ChatRequest):
         raise
     except Exception as e:
         print(f"[CHAT] Erro ao chamar Groq: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro ao processar chat: {str(e)}")
+        raise HTTPException(status_code=500, detail="Erro interno ao processar chat")
 
 
