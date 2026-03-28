@@ -72,6 +72,13 @@ CHAT_USE_BETSAPI_CONTEXT = os.getenv("CHAT_USE_BETSAPI_CONTEXT", "true").strip()
 }
 CHAT_DB_CONTEXT_LIMIT = int(os.getenv("CHAT_DB_CONTEXT_LIMIT", "6"))
 CHAT_BETSAPI_CONTEXT_LIMIT = int(os.getenv("CHAT_BETSAPI_CONTEXT_LIMIT", "6"))
+CHAT_USE_FBREF_CONTEXT = os.getenv("CHAT_USE_FBREF_CONTEXT", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHAT_FBREF_CONTEXT_LIMIT = int(os.getenv("CHAT_FBREF_CONTEXT_LIMIT", "6"))
 
 # Cache em memória para perguntas repetidas em curto intervalo.
 _fast_cache: dict[str, tuple[float, dict]] = {}
@@ -378,48 +385,127 @@ def _get_betsapi_context_rows(user_message: str, limit: int = 6) -> list[dict]:
     return rows[: max(1, limit)]
 
 
+def _get_fbref_context_rows(user_message: str, limit: int = 6) -> list[dict]:
+    if not CHAT_USE_FBREF_CONTEXT or not get_db_connection or not release_connection:
+        return []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        terms = _extract_terms(user_message)
+        like_terms = [f"%{t}%" for t in terms] if terms else []
+
+        if like_terms:
+            cursor.execute(
+                """
+                SELECT player_name, squad, comp, season, starts, minutes_90s, goals, assists
+                FROM tb_fbref_player_stats
+                WHERE LOWER(player_name) LIKE ANY(%s)
+                   OR LOWER(squad) LIKE ANY(%s)
+                   OR LOWER(comp) LIKE ANY(%s)
+                ORDER BY COALESCE(minutes_90s, 0) DESC
+                LIMIT %s
+                """,
+                (like_terms, like_terms, like_terms, max(1, limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT player_name, squad, comp, season, starts, minutes_90s, goals, assists
+                FROM tb_fbref_player_stats
+                ORDER BY COALESCE(minutes_90s, 0) DESC
+                LIMIT %s
+                """,
+                (max(1, limit),),
+            )
+
+        rows = cursor.fetchall() or []
+        parsed = []
+        for row in rows:
+            parsed.append(
+                {
+                    "player_name": row[0],
+                    "squad": row[1],
+                    "comp": row[2],
+                    "season": row[3],
+                    "starts": row[4],
+                    "minutes_90s": row[5],
+                    "goals": row[6],
+                    "assists": row[7],
+                }
+            )
+        return parsed
+    except Exception as e:
+        print(f"[CHAT] Falha ao buscar contexto FBref: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                release_connection(conn)
+            except Exception:
+                pass
+
+
 def _build_runtime_context_text(user_message: str) -> str:
     db_rows = _get_db_context_rows(user_message, CHAT_DB_CONTEXT_LIMIT)
     bets_rows = _get_betsapi_context_rows(user_message, CHAT_BETSAPI_CONTEXT_LIMIT)
+    fbref_rows = _get_fbref_context_rows(user_message, CHAT_FBREF_CONTEXT_LIMIT)
 
     parts = [
-        "[CONTEXTO EXECUCAO]",
-        "Use apenas os dados abaixo como apoio factual quando houver correspondencia com a pergunta.",
+        "[CONTEXTO RAG - EDSON]",
+        "Use os blocos abaixo como base factual. Nao invente dado numerico sem marcar [ESTIMATIVA] ou [MOCK].",
     ]
 
-    if db_rows:
-        parts.append("[BANCO_HISTORICO_NEON]")
-        for row in db_rows:
-            parts.append(
-                (
-                    f"- {row.get('competicao') or 'Competicao'} "
-                    f"({row.get('temporada') or 'N/A'}): "
-                    f"{row.get('time_casa') or 'Time Casa'} {row.get('gols_casa') if row.get('gols_casa') is not None else '-'}"
-                    f" x {row.get('gols_fora') if row.get('gols_fora') is not None else '-'} {row.get('time_fora') or 'Time Fora'}"
-                )
-            )
-
+    parts.append("[BETSAPI - AO VIVO]")
     if bets_rows:
-        parts.append("[BETSAPI_PARTIDAS]")
         for row in bets_rows:
             kind = "AO_VIVO" if row.get("kind") == "live" else "PROXIMO"
             minute = row.get("minute")
-            minute_text = f" minuto {minute}" if minute not in (None, "", 0, "0") else ""
+            minute_text = f" minuto={minute}" if minute not in (None, "", 0, "0") else ""
             score = row.get("score")
-            score_text = f" placar {score}" if score else ""
+            score_text = f" placar={score}" if score else ""
             parts.append(
                 (
-                    f"- [{kind}] {row.get('league') or 'Liga'}: "
-                    f"{row.get('home') or 'Time Casa'} x {row.get('away') or 'Time Fora'}"
+                    f"- [{kind}] liga={row.get('league') or 'N/A'} | "
+                    f"jogo={row.get('home') or 'Time Casa'} x {row.get('away') or 'Time Fora'} |"
                     f"{score_text}{minute_text}"
                 )
             )
+    else:
+        parts.append("- [ESTIMATIVA] BetsAPI indisponivel ou sem partidas relevantes no momento.")
 
-    if not db_rows and not bets_rows:
-        return ""
+    parts.append("[STATSBOMB - HISTORICO]")
+    if db_rows:
+        for row in db_rows:
+            parts.append(
+                (
+                    f"- competicao={row.get('competicao') or 'N/A'} | temporada={row.get('temporada') or 'N/A'} | "
+                    f"placar={row.get('time_casa') or 'Time Casa'} {row.get('gols_casa') if row.get('gols_casa') is not None else '-'}"
+                    f" x {row.get('gols_fora') if row.get('gols_fora') is not None else '-'} {row.get('time_fora') or 'Time Fora'}"
+                )
+            )
+    else:
+        parts.append("- [ESTIMATIVA] Historico StatsBomb/Neon indisponivel para os termos consultados.")
+
+    parts.append("[FBREF - FORMA ATUAL]")
+    if fbref_rows:
+        for row in fbref_rows:
+            parts.append(
+                (
+                    f"- jogador={row.get('player_name') or 'N/A'} | clube={row.get('squad') or 'N/A'} | "
+                    f"comp={row.get('comp') or 'N/A'} | temporada={row.get('season') or 'N/A'} | "
+                    f"starts={row.get('starts') if row.get('starts') is not None else 'N/A'} | "
+                    f"min90={row.get('minutes_90s') if row.get('minutes_90s') is not None else 'N/A'} | "
+                    f"gols={row.get('goals') if row.get('goals') is not None else 'N/A'} | "
+                    f"assist={row.get('assists') if row.get('assists') is not None else 'N/A'}"
+                )
+            )
+    else:
+        parts.append("- [MOCK] Base FBref ausente para consulta atual; nao use numeros exatos sem rotular como estimativa.")
 
     parts.append(
-        "[REGRAS_DE_USO] Se nao houver dado suficiente no contexto para responder com seguranca, diga isso objetivamente e ofereca proximo passo util."
+        "[REGRAS_DE_USO] Se faltar dado para assertividade, responda com transparencia e informe explicitamente o que e [ESTIMATIVA] ou [MOCK]."
     )
     return "\n".join(parts)
 
