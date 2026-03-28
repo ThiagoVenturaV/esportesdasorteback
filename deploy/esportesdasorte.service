@@ -1,0 +1,20 @@
+[Unit]
+Description=Esportes da Sorte Backend (Gunicorn + Uvicorn)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=/home/ubuntu/esportesdasorte/backend
+EnvironmentFile=/home/ubuntu/esportesdasorte/backend/.env
+ExecStartPre=/bin/mkdir -p /var/log/gunicorn
+ExecStart=/home/ubuntu/esportesdasorte/backend/.venv/bin/gunicorn main:app -c gunicorn.conf.py
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=esportesdasorte
+
+[Install]
+WantedBy=multi-user.target
