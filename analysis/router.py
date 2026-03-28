@@ -49,6 +49,20 @@ def _display_name(value, fallback: str) -> str:
     return str(value)
 
 
+def _normalize_predicted_winner(value, home_team: str, away_team: str) -> str:
+    """Converte tokens técnicos (home_win/draw/away_win) para texto legível."""
+    normalized = _display_name(value, home_team).strip().lower()
+
+    if normalized in {"home", "home_win", "mandante", "casa", "1"}:
+        return home_team
+    if normalized in {"away", "away_win", "visitante", "fora", "2"}:
+        return away_team
+    if normalized in {"draw", "empate", "x"}:
+        return "Empate"
+
+    return _display_name(value, home_team)
+
+
 def _extract_live_fields(match: dict) -> dict:
     home_team_raw = (
         match.get("home")
@@ -151,7 +165,7 @@ def _normalize_analysis_payload(raw: dict | None, home_team: str, away_team: str
         or raw.get("prediction")
         or home_team
     )
-    predicted = _display_name(predicted_raw, home_team)
+    predicted = _normalize_predicted_winner(predicted_raw, home_team, away_team)
 
     return {
         "winProbability": {"home": home, "draw": draw, "away": away},
