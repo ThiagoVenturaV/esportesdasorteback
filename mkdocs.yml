@@ -64,4 +64,5 @@ nav:
       - Fluxo de Analise: fluxo-analise.md
       - Rate Limiting: rate-limiting.md
   - Operacao:
+      - Runbook Railway: runbook-railway.md
       - Troubleshooting: troubleshooting.md
