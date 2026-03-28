@@ -9,6 +9,7 @@ Gerencia cache de análises com diferentes TTLs:
 import os
 import json
 import re
+import time
 from datetime import datetime, UTC
 try:
     from groq import Groq
@@ -26,6 +27,11 @@ ANALYSIS_TTL_UPCOMING_H = int(os.getenv("ANALYSIS_TTL_UPCOMING_HOURS", "24"))
 ANALYSIS_MODEL_MAX_TOKENS = int(os.getenv("ANALYSIS_MODEL_MAX_TOKENS", "260"))
 ANALYSIS_MODEL_TEMPERATURE = float(os.getenv("ANALYSIS_MODEL_TEMPERATURE", "0.15"))
 GEMINI_MODEL_ANALYSIS = os.getenv("GEMINI_MODEL_ANALYSIS", "gemini-2.5-flash-lite")
+ANALYSIS_GROQ_BACKOFF_SECONDS = int(os.getenv("ANALYSIS_GROQ_BACKOFF_SECONDS", "90"))
+GROQ_MODEL_ANALYSIS = os.getenv(
+    "GROQ_MODEL_ANALYSIS",
+    os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+)
 
 try:
     from db.neon import get_db_connection, release_connection
@@ -34,6 +40,7 @@ except ImportError:
 
 
 _TB_ANALISE_COLUMNS: set[str] | None = None
+_GROQ_BACKOFF_UNTIL_TS = 0.0
 
 
 def get_saved_analysis(match_id: str, is_live: bool = True) -> dict | None:
@@ -269,6 +276,32 @@ def _coerce_analysis_payload(data: dict | None, match_data: dict) -> dict | None
     }
 
 
+def _is_groq_backoff_active() -> bool:
+    return time.time() < _GROQ_BACKOFF_UNTIL_TS
+
+
+def _extract_retry_seconds_from_error(error_message: str) -> int:
+    text = str(error_message or "")
+    mm_ss = re.search(r"try again in\s*(\d+)m([\d.]+)s", text, flags=re.IGNORECASE)
+    if mm_ss:
+        minutes = int(mm_ss.group(1))
+        seconds = float(mm_ss.group(2))
+        return max(1, int(minutes * 60 + seconds) + 1)
+
+    only_seconds = re.search(r"try again in\s*([\d.]+)s", text, flags=re.IGNORECASE)
+    if only_seconds:
+        return max(1, int(float(only_seconds.group(1))) + 1)
+
+    return max(1, ANALYSIS_GROQ_BACKOFF_SECONDS)
+
+
+def _register_groq_backoff(error_message: str):
+    global _GROQ_BACKOFF_UNTIL_TS
+    retry_after = _extract_retry_seconds_from_error(error_message)
+    _GROQ_BACKOFF_UNTIL_TS = time.time() + retry_after
+    print(f"[ANALYSIS] Groq em cooldown por {retry_after}s após rate limit")
+
+
 def analyze_match_with_ai(match_data: dict, prompt: str = None) -> dict | None:
     """
     Análise de partida com Groq (JSON estruturado).
@@ -317,8 +350,12 @@ Dados da partida:
     if not Groq:
         return None
 
+    if _is_groq_backoff_active():
+        print("[ANALYSIS] Groq em cooldown ativo, pulando tentativa")
+        return None
+
     try:
-        groq_model = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+        groq_model = GROQ_MODEL_ANALYSIS
         groq_api_key = os.getenv("GROQ_API_KEY")
 
         if not groq_api_key:
@@ -338,6 +375,10 @@ Dados da partida:
             if normalized:
                 return normalized
         except Exception as strict_error:
+            strict_error_text = str(strict_error)
+            if "rate_limit" in strict_error_text.lower() or "rate limit" in strict_error_text.lower():
+                _register_groq_backoff(strict_error_text)
+                return None
             print(f"[ANALYSIS] Groq strict JSON falhou, retry livre: {strict_error}")
 
         # Retry sem response_format para evitar json_validate_failed no provedor.
@@ -351,6 +392,9 @@ Dados da partida:
         normalized = _coerce_analysis_payload(parsed, match_data)
         return normalized
     except Exception as e:
+        error_text = str(e)
+        if "rate_limit" in error_text.lower() or "rate limit" in error_text.lower():
+            _register_groq_backoff(error_text)
         print(f"[ANALYSIS] Groq erro: {e}")
         return None
 
