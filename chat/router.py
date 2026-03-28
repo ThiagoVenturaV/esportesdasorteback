@@ -226,6 +226,27 @@ def _strip_markdown_formatting(text: str) -> str:
     return cleaned.strip()
 
 
+def _strip_internal_source_markers(text: str) -> str:
+    cleaned = str(text or "")
+    if not cleaned:
+        return cleaned
+
+    # Remove internal provenance markers from user-facing text.
+    marker_pattern = (
+        r"\[(?:"
+        r"betsapi|estimativa|mock|statsbomb|fbref|ao_vivo|proximo|"
+        r"banco_historico_neon|contesto|contexto_rag|regras_de_uso"
+        r")(?:\s*[-_ ]\s*[a-z0-9]+)*\]"
+    )
+    cleaned = re.sub(marker_pattern, "", cleaned, flags=re.IGNORECASE)
+
+    # Normalize spaces left after marker removal.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n\s+", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _sanitize_user_message(text: str) -> str:
     msg = str(text or "").strip()
     if len(msg) > CHAT_MAX_USER_CHARS:
@@ -803,6 +824,7 @@ async def chat(request: Request, payload: ChatRequest):
                 response_text = _build_actionable_followup_fallback(user_message)
 
         response_text = _strip_markdown_formatting(response_text)
+        response_text = _strip_internal_source_markers(response_text)
 
         result = {
             "response": response_text,
