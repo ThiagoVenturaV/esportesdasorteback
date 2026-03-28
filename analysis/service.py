@@ -33,6 +33,9 @@ except ImportError:
     from db_neon import get_db_connection, release_connection
 
 
+_TB_ANALISE_COLUMNS: set[str] | None = None
+
+
 def get_saved_analysis(match_id: str, is_live: bool = True) -> dict | None:
     """
     Recupera uma análise salva do cache, respeitando o TTL.
@@ -92,7 +95,23 @@ def get_saved_analysis(match_id: str, is_live: bool = True) -> dict | None:
             release_connection(conn)
 
 
-def save_analysis(match_id: str, analysis_json: dict | str) -> bool:
+def _get_tb_analise_columns(cursor) -> set[str]:
+    global _TB_ANALISE_COLUMNS
+    if _TB_ANALISE_COLUMNS is not None:
+        return _TB_ANALISE_COLUMNS
+
+    cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'tb_analise'
+        """
+    )
+    _TB_ANALISE_COLUMNS = {str(row[0]).lower() for row in (cursor.fetchall() or [])}
+    return _TB_ANALISE_COLUMNS
+
+
+def save_analysis(match_id: str, analysis_json: dict | str, nome: str | None = None) -> bool:
     """
     Salva uma análise no cache.
     
@@ -114,16 +133,30 @@ def save_analysis(match_id: str, analysis_json: dict | str) -> bool:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # INSERT ON CONFLICT para atualizar se já existe
-        sql = """
-            INSERT INTO tb_analise (match_id, analise_json, criado_em)
-            VALUES (%s, %s, NOW())
-            ON CONFLICT (match_id) DO UPDATE
-            SET analise_json = EXCLUDED.analise_json,
-                criado_em = NOW()
-        """
-        
-        cursor.execute(sql, (match_id, analysis_str))
+        columns = _get_tb_analise_columns(cursor)
+
+        effective_nome = str(nome or f"Análise {match_id}").strip() or f"Análise {match_id}"
+
+        # Compatibilidade com schemas legados que exigem coluna nome NOT NULL.
+        if "nome" in columns:
+            sql = """
+                INSERT INTO tb_analise (match_id, analise_json, nome, criado_em)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (match_id) DO UPDATE
+                SET analise_json = EXCLUDED.analise_json,
+                    nome = EXCLUDED.nome,
+                    criado_em = NOW()
+            """
+            cursor.execute(sql, (match_id, analysis_str, effective_nome))
+        else:
+            sql = """
+                INSERT INTO tb_analise (match_id, analise_json, criado_em)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (match_id) DO UPDATE
+                SET analise_json = EXCLUDED.analise_json,
+                    criado_em = NOW()
+            """
+            cursor.execute(sql, (match_id, analysis_str))
         conn.commit()
         
         print(f"[ANALYSIS] Análise salva para {match_id}")

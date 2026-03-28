@@ -11,6 +11,8 @@ from odds.betsapi import fetch_live_matches
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
+LIVE_ANALYSES_MAX_LIMIT = 30
+
 
 def _safe_int(value, default=0):
     try:
@@ -248,6 +250,10 @@ async def analyze_match_front(match_id: str, home_team: str = "Time Casa", away_
 @router.get("/analises-ao-vivo")
 async def get_live_analyses(limit: int = 8):
     """Retorna partidas ao vivo em formato pronto para o frontend."""
+    effective_limit = limit if limit and limit > 0 else LIVE_ANALYSES_MAX_LIMIT
+    if effective_limit > LIVE_ANALYSES_MAX_LIMIT:
+        effective_limit = LIVE_ANALYSES_MAX_LIMIT
+
     live_matches = fetch_live_matches() or []
 
     analyses = []
@@ -303,7 +309,7 @@ async def get_live_analyses(limit: int = 8):
             }
         )
 
-        if limit > 0 and len(analyses) >= limit:
+        if len(analyses) >= effective_limit:
             break
 
     return {
