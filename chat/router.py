@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 import os
 import json
+import time
 try:
     from groq import Groq
 except ImportError:
@@ -31,7 +32,14 @@ class ChatRequest(BaseModel):
     history: list = Field(default_factory=list)
 
 
-CHAT_HISTORY_MAX_TURNS = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "12"))
+CHAT_HISTORY_MAX_TURNS = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "8"))
+CHAT_MAX_USER_CHARS = int(os.getenv("CHAT_MAX_USER_CHARS", "500"))
+CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CHAT_RESPONSE_MAX_TOKENS", "320"))
+CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.35"))
+CHAT_FAST_CACHE_TTL_SECONDS = int(os.getenv("CHAT_FAST_CACHE_TTL_SECONDS", "90"))
+
+# Cache em memória para perguntas repetidas em curto intervalo.
+_fast_cache: dict[str, tuple[float, dict]] = {}
 
 
 def _normalize_role(role: str) -> str | None:
@@ -144,6 +152,48 @@ def _coerce_to_natural_ptbr(text: str) -> str:
         return raw
 
 
+def _sanitize_user_message(text: str) -> str:
+    msg = str(text or "").strip()
+    if len(msg) > CHAT_MAX_USER_CHARS:
+        msg = msg[:CHAT_MAX_USER_CHARS]
+    return msg
+
+
+def _build_fast_cache_key(message: str, history_messages: list) -> str:
+    recent = history_messages[-4:] if history_messages else []
+    parts = [message.lower()]
+    for item in recent:
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "").strip().lower()
+        if content:
+            parts.append(f"{role}:{content[:180]}")
+    return "||".join(parts)
+
+
+def _get_fast_cache(cache_key: str) -> dict | None:
+    now = time.time()
+    cached = _fast_cache.get(cache_key)
+    if not cached:
+        return None
+
+    expires_at, payload = cached
+    if expires_at <= now:
+        _fast_cache.pop(cache_key, None)
+        return None
+    return payload
+
+
+def _set_fast_cache(cache_key: str, payload: dict):
+    _fast_cache[cache_key] = (time.time() + CHAT_FAST_CACHE_TTL_SECONDS, payload)
+
+    # Limpeza simples para evitar crescimento sem limite.
+    if len(_fast_cache) > 600:
+        now = time.time()
+        stale_keys = [k for k, (exp, _) in _fast_cache.items() if exp <= now]
+        for key in stale_keys[:250]:
+            _fast_cache.pop(key, None)
+
+
 # Aplicar rate limit ao endpoint
 def _apply_rate_limit():
     """Retorna o decorator de rate limit se disponível."""
@@ -215,27 +265,41 @@ async def chat(request: Request, payload: ChatRequest):
         # Build messages list for conversation (normaliza formatos Gemini/OpenAI)
         messages = [{"role": "system", "content": EDSON_SYSTEM_PROMPT}]
         history = payload.conversation_history or payload.history
+        normalized_history = []
         if history:
-            messages.extend(_trim_history(_normalize_history(history)))
+            normalized_history = _trim_history(_normalize_history(history))
+            messages.extend(normalized_history)
+
+        user_message = _sanitize_user_message(payload.message)
+        if not user_message:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+
+        cache_key = _build_fast_cache_key(user_message, normalized_history)
+        cached_payload = _get_fast_cache(cache_key)
+        if cached_payload:
+            return cached_payload
+
         messages.append({
             "role": "user",
-            "content": payload.message.strip()
+            "content": user_message
         })
         
         # Call Groq API with chat model
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL_CHAT,
-            temperature=0.7,
-            max_tokens=600,
+            temperature=CHAT_TEMPERATURE,
+            max_tokens=CHAT_RESPONSE_MAX_TOKENS,
             messages=messages
         )
         
         response_text = _coerce_to_natural_ptbr(completion.choices[0].message.content)
-        
-        return {
+
+        result = {
             "response": response_text,
             "cta": None
         }
+        _set_fast_cache(cache_key, result)
+        return result
     except HTTPException:
         raise
     except Exception as e:
