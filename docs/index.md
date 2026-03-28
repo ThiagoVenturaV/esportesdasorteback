@@ -1,17 +1,35 @@
-# Welcome to MkDocs
+# Edson AI - Backend Documentation
 
-For full documentation visit [mkdocs.org](https://www.mkdocs.org).
+Bem-vindo a documentacao oficial do backend do projeto Esportes da Sorte.
 
-## Commands
+Esta base centraliza arquitetura, endpoints, configuracao de ambiente,
+deploy e operacao em producao.
 
-* `mkdocs new [dir-name]` - Create a new project.
-* `mkdocs serve` - Start the live-reloading docs server.
-* `mkdocs build` - Build the documentation site.
-* `mkdocs -h` - Print help message and exit.
+## O que voce encontra aqui
 
-## Project layout
+- Guia rapido para rodar localmente
+- Estrutura modular completa do backend
+- Referencia dos principais endpoints
+- Estrategia de rate limit e cache TTL
+- Passo a passo de deploy no Railway e GitHub Pages
+- Checklist de troubleshooting
 
-    mkdocs.yml    # The configuration file.
-    docs/
-        index.md  # The documentation homepage.
-        ...       # Other markdown pages, images and other files.
+## Stack principal
+
+- FastAPI
+- PostgreSQL Neon
+- Groq (chat e analises)
+- BetsAPI/Sportingtech
+- SlowAPI para rate limiting
+
+## Links rapidos
+
+- Repositorio: https://github.com/ThiagoVenturaV/esportesdasorteback
+- Swagger (ambiente em execucao): /docs
+- Healthcheck: /health
+
+## Proximos passos
+
+1. Abra Guia > Primeiros Passos para setup local.
+2. Leia Backend > Endpoints API para integrar o frontend.
+3. Use Operacao > Troubleshooting em caso de erro em producao.
