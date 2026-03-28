@@ -18,6 +18,8 @@ except ImportError:
 # TTL configurável por variáveis de ambiente
 ANALYSIS_TTL_LIVE_MIN = int(os.getenv("ANALYSIS_TTL_LIVE_MINUTES", "5"))
 ANALYSIS_TTL_UPCOMING_H = int(os.getenv("ANALYSIS_TTL_UPCOMING_HOURS", "24"))
+ANALYSIS_MODEL_MAX_TOKENS = int(os.getenv("ANALYSIS_MODEL_MAX_TOKENS", "260"))
+ANALYSIS_MODEL_TEMPERATURE = float(os.getenv("ANALYSIS_MODEL_TEMPERATURE", "0.15"))
 
 try:
     from db.neon import get_db_connection, release_connection
@@ -165,18 +167,27 @@ def analyze_match_with_ai(match_data: dict, prompt: str = None) -> dict | None:
         groq_client = Groq(api_key=groq_api_key)
         
         if not prompt:
-            prompt = f"""Analyze match data and return JSON:
--prediction: home_win|draw|away_win
-- confidence: 0-100
-- key_factors: list
-- recommended_bet: string
+            prompt = f"""Retorne APENAS JSON válido para análise esportiva curta.
 
-Match: {json.dumps(match_data, ensure_ascii=False)}"""
+Campos obrigatórios:
+- winProbability: {{"home": int, "draw": int, "away": int}} (somar ~100)
+- confidenceScore: int (0-100)
+- predictedWinner: "home_win" | "draw" | "away_win"
+- commentary: array com 1 a 3 frases curtas em pt-BR
+- goalProbabilityNextMinute: int (0-100)
+- cardRiskHome: int (0-100)
+- cardRiskAway: int (0-100)
+- penaltyRisk: int (0-100)
+- momentumHome: int (0-100)
+- momentumAway: int (0-100)
+
+Dados da partida:
+{json.dumps(match_data, ensure_ascii=False)}"""
         
         completion = groq_client.chat.completions.create(
             model=groq_model,
-            temperature=0.2,
-            max_tokens=900,
+            temperature=ANALYSIS_MODEL_TEMPERATURE,
+            max_tokens=ANALYSIS_MODEL_MAX_TOKENS,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}]
         )

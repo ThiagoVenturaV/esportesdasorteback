@@ -203,7 +203,10 @@ async def get_analysis(match_id: str, is_live: bool = True):
 @router.get("/analises-salvas/{match_id}")
 async def get_saved_analysis_front(match_id: str, home_team: str = "Time Casa", away_team: str = "Time Fora"):
     """Endpoint compatível com o frontend para leitura de análise já persistida."""
+    # DB-first: tenta cache live e, se não houver, cache de partidas futuras.
     saved = get_saved_analysis(match_id, is_live=True)
+    if not saved:
+        saved = get_saved_analysis(match_id, is_live=False)
     if not saved:
         return {"sucesso": False, "analise": None}
 
@@ -216,11 +219,14 @@ async def get_saved_analysis_front(match_id: str, home_team: str = "Time Casa", 
 @router.get("/analisar/{match_id}")
 async def analyze_match_front(match_id: str, home_team: str = "Time Casa", away_team: str = "Time Fora"):
     """Endpoint compatível com o frontend para gerar análise sob demanda."""
+    # DB-first para economizar tokens e reduzir latência.
     saved = get_saved_analysis(match_id, is_live=True)
+    if not saved:
+        saved = get_saved_analysis(match_id, is_live=False)
     if saved:
         return _normalize_analysis_payload(saved, home_team, away_team)
 
-    # Gera uma análise mínima se ainda não houver cache estruturado.
+    # Só chama o modelo se não houver cache útil no banco.
     generated = analyze_match_with_ai(
         {
             "match_id": match_id,
@@ -229,6 +235,10 @@ async def analyze_match_front(match_id: str, home_team: str = "Time Casa", away_
             "league": "Futebol",
         }
     )
+
+    if not isinstance(generated, dict):
+        # Fallback determinístico para nunca quebrar a tela de análise.
+        generated = _default_analysis(home_team, away_team)
 
     normalized = _normalize_analysis_payload(generated, home_team, away_team)
     save_analysis(match_id, normalized)
