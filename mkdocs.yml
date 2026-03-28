@@ -60,6 +60,8 @@ nav:
   - Backend:
       - Arquitetura: arquitetura.md
       - Endpoints API: api.md
+      - IA Providers: ia-providers.md
+      - Fluxo de Analise: fluxo-analise.md
       - Rate Limiting: rate-limiting.md
   - Operacao:
       - Troubleshooting: troubleshooting.md
