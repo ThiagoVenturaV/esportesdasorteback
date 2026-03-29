@@ -51,11 +51,11 @@ class ChatRequest(BaseModel):
 
 CHAT_HISTORY_MAX_TURNS = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "8"))
 CHAT_MAX_USER_CHARS = int(os.getenv("CHAT_MAX_USER_CHARS", "500"))
-CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CHAT_RESPONSE_MAX_TOKENS", "220"))
-CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.35"))
+CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CHAT_RESPONSE_MAX_TOKENS", "320"))
+CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.58"))
 CHAT_FAST_CACHE_TTL_SECONDS = int(os.getenv("CHAT_FAST_CACHE_TTL_SECONDS", "90"))
-CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "8"))
-CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "720"))
+CHAT_MAX_RESPONSE_LINES = int(os.getenv("CHAT_MAX_RESPONSE_LINES", "10"))
+CHAT_MAX_RESPONSE_CHARS = int(os.getenv("CHAT_MAX_RESPONSE_CHARS", "900"))
 GEMINI_MODEL_CHAT = os.getenv("GEMINI_MODEL_CHAT", "gemini-2.5-flash-lite")
 GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "openai/gpt-oss-120b")
 CHAT_USE_DB_CONTEXT = os.getenv("CHAT_USE_DB_CONTEXT", "true").strip().lower() in {
@@ -252,6 +252,24 @@ def _sanitize_user_message(text: str) -> str:
     if len(msg) > CHAT_MAX_USER_CHARS:
         msg = msg[:CHAT_MAX_USER_CHARS]
     return msg
+
+
+def _expand_ptbr_chat_slang(text: str) -> str:
+    expanded = str(text or "")
+    replacements = {
+        r"\bvc\b": "voce",
+        r"\bvcs\b": "voces",
+        r"\bpq\b": "porque",
+        r"\bq\b": "que",
+        r"\btbm\b": "tambem",
+        r"\bmto\b": "muito",
+        r"\bto\b": "estou",
+        r"\bta\b": "esta",
+        r"\bblz\b": "beleza",
+    }
+    for pattern, repl in replacements.items():
+        expanded = re.sub(pattern, repl, expanded, flags=re.IGNORECASE)
+    return expanded.strip()
 
 
 def _build_fast_cache_key(message: str, history_messages: list) -> str:
@@ -562,7 +580,7 @@ def _messages_to_plain_prompt(messages: list[dict]) -> str:
             lines.append(f"[USUARIO]\n{content}")
 
     lines.append(
-        "[INSTRUCAO FINAL]\nResponda em pt-BR de forma objetiva, sem JSON e sem listas longas."
+        "[INSTRUCAO FINAL]\nResponda em pt-BR natural e conversacional, direto ao ponto, sem JSON bruto."
     )
     return "\n\n".join(lines)
 
@@ -604,11 +622,10 @@ def _is_repetitive_reply(reply: str, history_messages: list[dict], user_message:
 def _build_actionable_followup_fallback(user_message: str) -> str:
     msg = str(user_message or "").strip()
     return (
-        f"Fechado, vamos objetivo em cima disso: {msg or 'partida atual'}. "
-        "Entrada principal: vitoria do favorito com protecao parcial em empate (DNB), confianca media. "
-        "Alternativa conservadora: under da equipe que esta em desvantagem, buscando menos volatilidade. "
-        "Gestao sugerida: stake fracionada (50% principal, 30% conservadora, 20% reserva para ajuste ao vivo). "
-        "Risco principal: gol aleatorio no fim por bola parada mudando totalmente o mercado."
+        f"Boa, vamos nessa linha: {msg or 'partida atual'}. "
+        "Se voce quer reduzir risco, priorize entrada com protecao parcial e evite odd esticada no fim do jogo. "
+        "Minha leitura: melhor ir em stake moderada e guardar parte para ajuste ao vivo se o ritmo cair. "
+        "Risco principal: mudanca brusca de dinamica em bola parada ou substituicao tardia."
     )
 
 
@@ -618,10 +635,9 @@ def _rewrite_if_repetitive(messages: list[dict], user_message: str, repeated_rep
         {
             "role": "system",
             "content": (
-                "Reescreva sem repetir frases da resposta anterior. "
-                "Entregue uma resposta realmente util para aposta, em 4 a 6 linhas, com: "
-                "leitura do cenario, entrada principal, alternativa conservadora, risco principal e gestao de stake. "
-                "Nao use lista numerada."
+                "Reescreva sem repetir frases da resposta anterior e sem tom robotico. "
+                "Responda como um analista humano experiente, com linguagem natural, clara e pratica para aposta. "
+                "Mantenha entre 4 e 7 linhas e avance a decisao do usuario."
             ),
         }
     )
@@ -789,8 +805,9 @@ async def chat(request: Request, payload: ChatRequest):
         user_message = _sanitize_user_message(payload.message)
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensagem vazia")
+        interpreted_user_message = _expand_ptbr_chat_slang(user_message)
 
-        runtime_context_text = _build_runtime_context_text(user_message)
+        runtime_context_text = _build_runtime_context_text(interpreted_user_message)
         if runtime_context_text:
             messages.append({"role": "system", "content": runtime_context_text})
 
@@ -801,7 +818,7 @@ async def chat(request: Request, payload: ChatRequest):
 
         messages.append({
             "role": "user",
-            "content": user_message
+            "content": interpreted_user_message
         })
 
         # Provider chain: Gemini primário -> Groq fallback.
@@ -814,14 +831,14 @@ async def chat(request: Request, payload: ChatRequest):
 
         response_text = _coerce_to_natural_ptbr(provider_text)
         if _contains_forbidden_fallback_phrases(response_text):
-            response_text = _build_confident_mock_reply(user_message)
+            response_text = _build_confident_mock_reply(interpreted_user_message)
 
-        if _is_repetitive_reply(response_text, normalized_history, user_message):
-            rewritten = _rewrite_if_repetitive(messages, user_message, response_text)
+        if _is_repetitive_reply(response_text, normalized_history, interpreted_user_message):
+            rewritten = _rewrite_if_repetitive(messages, interpreted_user_message, response_text)
             if rewritten:
                 response_text = _coerce_to_natural_ptbr(rewritten)
-            if _is_repetitive_reply(response_text, normalized_history, user_message):
-                response_text = _build_actionable_followup_fallback(user_message)
+            if _is_repetitive_reply(response_text, normalized_history, interpreted_user_message):
+                response_text = _build_actionable_followup_fallback(interpreted_user_message)
 
         response_text = _strip_markdown_formatting(response_text)
         response_text = _strip_internal_source_markers(response_text)
