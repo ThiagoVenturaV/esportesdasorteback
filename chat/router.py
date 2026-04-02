@@ -8,6 +8,7 @@ import os
 import json
 import time
 import re
+import requests
 try:
     from groq import Groq
 except ImportError:
@@ -79,6 +80,15 @@ CHAT_USE_FBREF_CONTEXT = os.getenv("CHAT_USE_FBREF_CONTEXT", "true").strip().low
     "on",
 }
 CHAT_FBREF_CONTEXT_LIMIT = int(os.getenv("CHAT_FBREF_CONTEXT_LIMIT", "6"))
+CHAT_WEB_SEARCH_ENABLED = os.getenv("CHAT_WEB_SEARCH_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHAT_WEB_SEARCH_PROVIDER = os.getenv("CHAT_WEB_SEARCH_PROVIDER", "exa").strip().lower()
+CHAT_WEB_SEARCH_MAX_RESULTS = int(os.getenv("CHAT_WEB_SEARCH_MAX_RESULTS", "4"))
+CHAT_WEB_SEARCH_TIMEOUT_SECONDS = float(os.getenv("CHAT_WEB_SEARCH_TIMEOUT_SECONDS", "8"))
 
 # Cache em memória para perguntas repetidas em curto intervalo.
 _fast_cache: dict[str, tuple[float, dict]] = {}
@@ -328,6 +338,159 @@ def _infer_upcoming_days_from_message(user_message: str) -> int:
     if "amanha" in msg or "amanhã" in msg or "tomorrow" in msg:
         return 2
     return 1
+
+
+def _should_use_web_search(user_message: str) -> bool:
+    if not CHAT_WEB_SEARCH_ENABLED:
+        return False
+
+    msg = str(user_message or "").lower()
+    triggers = (
+        "hoje",
+        "agora",
+        "ao vivo",
+        "última hora",
+        "ultima hora",
+        "últimas",
+        "ultimas",
+        "recente",
+        "atual",
+        "noticia",
+        "lesão",
+        "lesao",
+        "escalação",
+        "escalacao",
+        "suspenso",
+        "lineup",
+        "injury",
+        "latest",
+        "breaking",
+    )
+    if any(token in msg for token in triggers):
+        return True
+
+    return len(_extract_terms(msg, max_terms=4)) >= 3
+
+
+def _build_web_search_query(user_message: str) -> str:
+    raw = str(user_message or "").strip()
+    if not raw:
+        return "futebol noticias hoje odds escalações"
+    return f"futebol aposta análise {raw}"
+
+
+def _fetch_exa_results(query: str, max_results: int) -> list[dict]:
+    api_key = os.getenv("EXA_API_KEY")
+    if not api_key:
+        return []
+
+    payload = {
+        "query": query,
+        "numResults": max(1, max_results),
+        "type": "auto",
+        "contents": {"text": True},
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": api_key,
+    }
+    response = requests.post(
+        "https://api.exa.ai/search",
+        json=payload,
+        headers=headers,
+        timeout=CHAT_WEB_SEARCH_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json() or {}
+
+    items = data.get("results") or []
+    parsed = []
+    for item in items[: max(1, max_results)]:
+        if not isinstance(item, dict):
+            continue
+        parsed.append(
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "snippet": (item.get("text") or "")[:320],
+                "date": item.get("publishedDate") or item.get("published_date"),
+                "source": "exa",
+            }
+        )
+    return parsed
+
+
+def _fetch_serper_results(query: str, max_results: int) -> list[dict]:
+    api_key = os.getenv("SERPER_API_KEY")
+    if not api_key:
+        return []
+
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        "https://google.serper.dev/search",
+        headers=headers,
+        json={"q": query, "num": max(1, max_results)},
+        timeout=CHAT_WEB_SEARCH_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json() or {}
+
+    organic = data.get("organic") or []
+    parsed = []
+    for item in organic[: max(1, max_results)]:
+        if not isinstance(item, dict):
+            continue
+        parsed.append(
+            {
+                "title": item.get("title"),
+                "url": item.get("link"),
+                "snippet": item.get("snippet"),
+                "date": item.get("date"),
+                "source": "serper",
+            }
+        )
+    return parsed
+
+
+def _get_web_context_rows(user_message: str, limit: int) -> list[dict]:
+    if not _should_use_web_search(user_message):
+        return []
+
+    query = _build_web_search_query(user_message)
+    try:
+        if CHAT_WEB_SEARCH_PROVIDER == "serper":
+            return _fetch_serper_results(query, limit)
+        return _fetch_exa_results(query, limit)
+    except Exception as e:
+        print(f"[CHAT] Falha na busca web ({CHAT_WEB_SEARCH_PROVIDER}): {e}")
+        return []
+
+
+def _build_web_context_text(user_message: str) -> str:
+    rows = _get_web_context_rows(user_message, CHAT_WEB_SEARCH_MAX_RESULTS)
+    if not rows:
+        return ""
+
+    parts = [
+        "[WEB_SEARCH - CONTEXTO RECENTE]",
+        "Use apenas como complemento. Priorize dados locais (BETSAPI/DB/FBREF) quando houver conflito.",
+    ]
+    for row in rows:
+        title = row.get("title") or "Sem titulo"
+        url = row.get("url") or "N/A"
+        date = row.get("date") or "N/A"
+        snippet = row.get("snippet") or ""
+        source = row.get("source") or CHAT_WEB_SEARCH_PROVIDER
+        parts.append(f"- fonte={source} | data={date} | titulo={title} | url={url}")
+        if snippet:
+            parts.append(f"  resumo={snippet}")
+
+    parts.append("[REGRAS_WEB] Nao trate web como verdade absoluta; sinalize incerteza quando necessario.")
+    return "\n".join(parts)
 
 
 def _get_db_context_rows(user_message: str, limit: int = 6) -> list[dict]:
@@ -810,6 +973,10 @@ async def chat(request: Request, payload: ChatRequest):
         runtime_context_text = _build_runtime_context_text(interpreted_user_message)
         if runtime_context_text:
             messages.append({"role": "system", "content": runtime_context_text})
+
+        web_context_text = _build_web_context_text(interpreted_user_message)
+        if web_context_text:
+            messages.append({"role": "system", "content": web_context_text})
 
         cache_key = _build_fast_cache_key(user_message, normalized_history)
         cached_payload = _get_fast_cache(cache_key)
